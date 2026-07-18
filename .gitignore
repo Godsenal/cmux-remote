@@ -1,0 +1,6 @@
+node_modules/
+cmux-remote
+*.bun-build
+.DS_Store
+*.png.tmp
+qr-sidebar.png

@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#0d0f12" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<link rel="icon" href="/icon-192.png" />
+<title>cmux remote</title>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #14181d;
+    --line: #262d36;
+    --fg: #d7dee7;
+    --dim: #7d8899;
+    --accent: #7aa2f7;
+    --danger: #f7768e;
+    --safe-b: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  body { display: flex; flex-direction: column; }
+
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 8px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+  #title {
+    flex: 1; font-size: 13px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); flex: none; }
+  #dot.on { background: #9ece6a; }
+
+  button {
+    background: #1e242c; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 10px; font-size: 13px;
+    font-family: inherit; cursor: pointer;
+  }
+  button:active { background: #2a323d; }
+
+  /* The screen is a pre-rendered character grid, so a <pre> is the whole renderer.
+     cmux returns no ANSI colour, which is why no terminal emulator is needed here. */
+  #screen {
+    flex: 1; margin: 0; padding: 8px 10px;
+    overflow: auto; -webkit-overflow-scrolling: touch;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 9px; line-height: 1.25;
+    white-space: pre; tab-size: 8;
+  }
+
+  #keys {
+    display: flex; gap: 5px; padding: 6px 8px; flex: none;
+    overflow-x: auto; background: var(--panel); border-top: 1px solid var(--line);
+  }
+  #keys button { flex: none; padding: 8px 11px; font-size: 12px; }
+  #keys button.warn { color: var(--danger); }
+
+  #bar {
+    display: flex; gap: 6px; padding: 6px 8px calc(6px + var(--safe-b));
+    background: var(--panel); border-top: 1px solid var(--line); flex: none;
+  }
+  #input {
+    flex: 1; min-width: 0; background: #0a0c0f; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 10px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 16px; /* 16px stops iOS zoom */
+  }
+  #input:focus { outline: none; border-color: var(--accent); }
+
+  #sidebar {
+    position: fixed; inset: 0 auto 0 0; width: min(85vw, 340px); z-index: 20;
+    background: var(--panel); border-right: 1px solid var(--line);
+    transform: translateX(-100%); transition: transform .2s ease;
+    display: flex; flex-direction: column;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  #sidebar.open { transform: none; }
+  #scrim {
+    position: fixed; inset: 0; z-index: 10; background: #000a;
+    opacity: 0; pointer-events: none; transition: opacity .2s;
+  }
+  #scrim.open { opacity: 1; pointer-events: auto; }
+  #wslist { flex: 1; overflow: auto; padding: 6px; }
+  .ws {
+    padding: 11px 12px; border-radius: 8px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .ws:active { background: #222933; }
+  .ws.sel { background: #1d2733; box-shadow: inset 2px 0 0 var(--accent); }
+  .ws .n { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ws .d { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ws .badge { color: var(--accent); font-size: 11px; }
+  .shead {
+    padding: 12px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .shead b { flex: 1; font-size: 13px; }
+
+  #pushbar {
+    flex: none; padding: 10px 12px calc(10px + var(--safe-b));
+    border-top: 1px solid var(--line);
+  }
+  #pushbar button { width: 100%; }
+  #pushnote { font-size: 11px; color: var(--dim); margin-top: 7px; line-height: 1.45; }
+  #pushnote.warn { color: #e0af68; }
+  #qrbox { margin-top: 10px; text-align: center; }
+  #qrimg {
+    width: 200px; height: 200px; max-width: 100%;
+    background: #fff; border-radius: 10px; padding: 8px;
+  }
+  #qrnote { font-size: 11px; color: var(--dim); margin-top: 6px; }
+
+  #toast {
+    position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 56px);
+    transform: translate(-50%, -14px); z-index: 30;
+    background: #1d2733; border: 1px solid var(--accent); color: var(--fg);
+    padding: 9px 14px; border-radius: 9px; font-size: 13px; max-width: 88vw;
+    opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+  }
+  #toast.on { opacity: 1; transform: translate(-50%, 0); }
+</style>
+</head>
+<body>
+
+<header>
+  <button id="menu" aria-label="워크스페이스 목록">☰</button>
+  <div id="title">연결 중…</div>
+  <div id="dot" aria-label="연결 상태"></div>
+</header>
+
+<pre id="screen"></pre>
+
+<div id="keys">
+  <button data-k="esc">esc</button>
+  <button data-k="up">↑</button>
+  <button data-k="down">↓</button>
+  <button data-k="left">←</button>
+  <button data-k="right">→</button>
+  <button data-k="tab">tab</button>
+  <button data-k="shift+tab">⇧tab</button>
+  <button data-k="enter">⏎</button>
+  <button data-k="ctrl+c" class="warn">^C</button>
+  <button data-k="ctrl+r">^R</button>
+</div>
+
+<div id="bar">
+  <input id="input" placeholder="입력 후 Enter" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" />
+  <button id="send">전송</button>
+</div>
+
+<div id="scrim"></div>
+<aside id="sidebar">
+  <div class="shead">
+    <b>워크스페이스</b>
+    <button id="fit" aria-label="너비 맞춤">맞춤</button>
+    <button id="fdec" aria-label="글자 작게">A−</button>
+    <button id="finc" aria-label="글자 크게">A+</button>
+  </div>
+  <div id="wslist"></div>
+  <div id="pushbar">
+    <button id="pushbtn">알림 켜기</button>
+    <div id="pushnote"></div>
+    <button id="qrbtn" style="margin-top:8px">다른 기기 연결 (QR)</button>
+    <div id="qrbox" hidden>
+      <img id="qrimg" alt="이 서버 접속 QR" />
+      <div id="qrnote">다른 폰·태블릿의 카메라로 스캔하면 바로 열립니다.</div>
+    </div>
+  </div>
+</aside>
+
+<div id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const screenEl = $("#screen"), titleEl = $("#title"), dotEl = $("#dot"), listEl = $("#wslist");
+const sidebar = $("#sidebar"), scrim = $("#scrim"), input = $("#input"), toast = $("#toast");
+const fitBtn = $("#fit");
+
+let ws = null, current = null, workspaces = [], toastTimer = null;
+
+// Survives PWA relaunch, where the token is no longer in the URL.
+const urlToken = new URLSearchParams(location.search).get("t");
+if (urlToken) localStorage.setItem("token", urlToken);
+const token = urlToken || localStorage.getItem("token") || "";
+
+let fontSize = Number(localStorage.getItem("fs") || 9);
+let autoFit = localStorage.getItem("fit") !== "0";
+
+// Ratio of glyph width to font-size for the monospace stack, measured once.
+const charRatio = (() => {
+  const probe = document.createElement("span");
+  probe.style.cssText =
+    "position:absolute;visibility:hidden;white-space:pre;font-size:100px;" +
+    "font-family:ui-monospace,'SF Mono',Menlo,monospace";
+  probe.textContent = "M".repeat(100);
+  document.body.append(probe);
+  const r = probe.getBoundingClientRect().width / 100 / 100;
+  probe.remove();
+  return r;
+})();
+
+/** Terminals are ~100-160 columns; on a phone the only way to see a whole line is to size to fit. */
+function applyFont() {
+  if (autoFit) {
+    const cols = Math.max(20, ...screenEl.textContent.split("\n").map((l) => l.length));
+    const avail = screenEl.clientWidth - 20; // padding
+    fontSize = Math.max(4, Math.min(18, avail / (cols * charRatio)));
+  }
+  screenEl.style.fontSize = fontSize.toFixed(2) + "px";
+  fitBtn.textContent = autoFit ? "맞춤 ✓" : "맞춤";
+}
+
+const nudge = (d) => {
+  autoFit = false;
+  localStorage.setItem("fit", "0");
+  fontSize = Math.max(4, Math.min(24, fontSize + d));
+  localStorage.setItem("fs", fontSize);
+  applyFont();
+};
+$("#finc").onclick = () => nudge(1);
+$("#fdec").onclick = () => nudge(-1);
+fitBtn.onclick = () => {
+  autoFit = !autoFit;
+  localStorage.setItem("fit", autoFit ? "1" : "0");
+  applyFont();
+};
+addEventListener("resize", applyFont);
+applyFont();
+
+function showToast(text) {
+  toast.textContent = text;
+  toast.classList.add("on");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("on"), 4000);
+}
+
+const setDrawer = (open) => {
+  sidebar.classList.toggle("open", open);
+  scrim.classList.toggle("open", open);
+};
+$("#menu").onclick = () => setDrawer(!sidebar.classList.contains("open"));
+scrim.onclick = () => setDrawer(false);
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+
+  ws.onopen = () => {
+    dotEl.classList.add("on");
+    const saved = localStorage.getItem("workspace");
+    if (saved) subscribe(saved);
+  };
+  ws.onclose = () => {
+    dotEl.classList.remove("on");
+    setTimeout(connect, 1200); // the bridge restarts often during development
+  };
+  ws.onmessage = (e) => handle(JSON.parse(e.data));
+}
+
+function handle(m) {
+  if (m.type === "screen") {
+    if (m.workspace !== current) return;
+    paint(m.text);
+  } else if (m.type === "workspaces") {
+    workspaces = m.workspaces;
+    renderList();
+    if (!current) {
+      const pick = workspaces.find((w) => w.selected) || workspaces[0];
+      if (pick) subscribe(pick.ref);
+    } else {
+      const w = workspaces.find((x) => x.ref === current);
+      if (w) titleEl.textContent = w.title;
+    }
+  } else if (m.type === "notifications") {
+    for (const n of m.items) notify(n);
+  } else if (m.type === "error") {
+    showToast(m.message);
+  }
+}
+
+function paint(text) {
+  // Keep the view pinned to the bottom only if the user was already there.
+  const atBottom = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
+  const left = screenEl.scrollLeft;
+  screenEl.textContent = text;
+  applyFont(); // width depends on the new content
+  screenEl.scrollLeft = left;
+  if (atBottom) screenEl.scrollTop = screenEl.scrollHeight;
+}
+
+function notify(n) {
+  const w = workspaces.find((x) => x.id === n.workspace_id);
+  const where = w ? w.title : "cmux";
+  const body = `${where} — ${n.body || n.subtitle || ""}`;
+
+  showToast(body);
+  if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
+    new Notification(n.title || "cmux", { body, tag: n.id });
+  }
+}
+
+function subscribe(ref) {
+  current = ref;
+  localStorage.setItem("workspace", ref);
+  screenEl.textContent = "";
+  const w = workspaces.find((x) => x.ref === ref);
+  titleEl.textContent = w ? w.title : ref;
+  renderList();
+  ws?.readyState === 1 && ws.send(JSON.stringify({ type: "subscribe", workspace: ref }));
+  setDrawer(false);
+}
+
+function renderList() {
+  listEl.innerHTML = "";
+  for (const w of workspaces) {
+    const el = document.createElement("div");
+    el.className = "ws" + (w.ref === current ? " sel" : "");
+    const dir = (w.current_directory || "").replace(/^\/Users\/[^/]+/, "~");
+    el.innerHTML =
+      `<div class="n">${esc(w.title)}</div>` +
+      `<div class="d">${esc(dir)}${w.selected ? ' <span class="badge">· 맥에서 열림</span>' : ""}</div>`;
+    el.onclick = () => subscribe(w.ref);
+    listEl.append(el);
+  }
+}
+
+const esc = (s) =>
+  String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const sendKey = (k) => ws?.readyState === 1 && ws.send(JSON.stringify({ type: "key", key: k }));
+
+function sendText() {
+  const text = input.value;
+  if (!text || ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: "send", text }));
+  ws.send(JSON.stringify({ type: "key", key: "enter" }));
+  input.value = "";
+}
+
+for (const b of document.querySelectorAll("#keys button")) {
+  b.onclick = () => sendKey(b.dataset.k);
+}
+$("#send").onclick = sendText;
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); sendText(); }
+});
+
+// --- push -----------------------------------------------------------------
+
+const VAPID_PUBLIC_KEY = "__VAPID_PUBLIC_KEY__";
+const pushBtn = $("#pushbtn"), pushNote = $("#pushnote");
+
+const urlB64ToBytes = (b64) => {
+  const padded = (b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+};
+
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.userAgent.includes("Mac") && "ontouchend" in document);
+const installed = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
+/** iOS refuses push unless the page is a secure context AND launched from the home screen. */
+function pushBlocker() {
+  if (!window.isSecureContext)
+    return "HTTPS가 아니라 푸시를 쓸 수 없습니다. Tailscale HTTPS 주소로 열어주세요.";
+  if (isIOS && !installed)
+    return "iOS는 홈 화면에 추가한 앱에서만 푸시가 됩니다. 공유 → 홈 화면에 추가 후, 그 아이콘으로 여세요.";
+  if (!("serviceWorker" in navigator) || !("PushManager" in window))
+    return "이 브라우저는 웹 푸시를 지원하지 않습니다.";
+  return null;
+}
+
+async function refreshPushUI() {
+  const blocker = pushBlocker();
+  if (blocker) {
+    pushBtn.disabled = true;
+    pushBtn.textContent = "알림 사용 불가";
+    pushNote.className = "warn";
+    pushNote.textContent = blocker;
+    return;
+  }
+
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  const on = !!sub && Notification.permission === "granted";
+
+  pushBtn.disabled = false;
+  pushBtn.textContent = on ? "알림 테스트" : "알림 켜기";
+  pushNote.className = "";
+  pushNote.textContent = on
+    ? "켜짐 — Claude Code가 입력을 기다리면 앱이 꺼져 있어도 폰이 울립니다."
+    : "Claude Code가 입력을 기다릴 때 폰으로 알림을 받습니다.";
+}
+
+pushBtn.onclick = async () => {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (await reg.pushManager.getSubscription()) {
+      await fetch("/push/test", { method: "POST" });
+      showToast("테스트 푸시를 보냈습니다.");
+      return;
+    }
+
+    if ((await Notification.requestPermission()) !== "granted") {
+      pushNote.className = "warn";
+      pushNote.textContent = "알림 권한이 거부됐습니다. iOS 설정 → 알림에서 허용해주세요.";
+      return;
+    }
+
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlB64ToBytes(VAPID_PUBLIC_KEY),
+    });
+    await fetch("/push/subscribe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(sub),
+    });
+    showToast("알림을 켰습니다.");
+  } catch (err) {
+    pushNote.className = "warn";
+    pushNote.textContent = "알림 등록 실패: " + err;
+  }
+  refreshPushUI();
+};
+
+navigator.serviceWorker?.addEventListener("message", (e) => {
+  if (e.data?.type === "open-workspace" && e.data.workspace) subscribe(e.data.workspace);
+});
+
+// "Connect another device": lazy-load the server-rendered QR of this origin.
+const qrBtn = $("#qrbtn"), qrBox = $("#qrbox"), qrImg = $("#qrimg");
+qrBtn.onclick = () => {
+  const show = qrBox.hidden;
+  qrBox.hidden = !show;
+  qrBtn.textContent = show ? "QR 숨기기" : "다른 기기 연결 (QR)";
+  if (show && !qrImg.src) qrImg.src = "/qr.svg";
+};
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").then(refreshPushUI).catch(() => refreshPushUI());
+} else {
+  refreshPushUI();
+}
+
+// Tapping a notification deep-links straight to the workspace that fired it.
+const deepLink = new URLSearchParams(location.search).get("ws");
+if (deepLink) localStorage.setItem("workspace", deepLink);
+
+connect();
+</script>
+</body>
+</html>

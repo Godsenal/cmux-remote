@@ -1,0 +1,19 @@
+{
+  "name": "cmux-remote",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run server.ts",
+    "build": "bun build --compile --minify server.ts --outfile cmux-remote"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "@types/web-push": "^3.6.4"
+  }
+}
