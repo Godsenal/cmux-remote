@@ -266,6 +266,56 @@ const setDrawer = (open) => {
 $("#menu").onclick = () => setDrawer(!sidebar.classList.contains("open"));
 scrim.onclick = () => setDrawer(false);
 
+// Edge-swipe to open, swipe to close — the standard mobile drawer gesture, following
+// the finger. Opening must start from the left edge so it never steals the terminal's
+// own horizontal scroll; closing works anywhere while the drawer is open.
+(() => {
+  const EDGE = 28; // px from the left edge that arms an opening drag
+  const drawerW = () => sidebar.getBoundingClientRect().width || Math.min(innerWidth * 0.85, 340);
+  let sx = 0, sy = 0, w = 0, live = false, decided = false, opening = false, pos = 0;
+
+  const freeze = (on) => {
+    sidebar.style.transition = scrim.style.transition = on ? "none" : "";
+  };
+  const clearInline = () => {
+    sidebar.style.transform = scrim.style.opacity = scrim.style.pointerEvents = "";
+  };
+
+  addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0], isOpen = sidebar.classList.contains("open");
+    if (!isOpen && t.clientX > EDGE) return; // opening drags only from the edge
+    sx = t.clientX; sy = t.clientY; w = drawerW();
+    live = true; decided = false; opening = !isOpen;
+  }, { passive: true });
+
+  addEventListener("touchmove", (e) => {
+    if (!live) return;
+    const t = e.touches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    if (!decided) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;      // wait until intent is clear
+      if (Math.abs(dy) >= Math.abs(dx)) { live = false; return; } // vertical → let it scroll
+      decided = true; freeze(true);
+    }
+    pos = Math.max(-w, Math.min(0, opening ? -w + Math.max(0, dx) : dx)); // -w=closed, 0=open
+    sidebar.style.transform = `translateX(${pos}px)`;
+    scrim.style.opacity = String(1 + pos / w);
+    scrim.style.pointerEvents = "auto";
+    e.preventDefault(); // owns the gesture now; stop the screen from scrolling under it
+  }, { passive: false });
+
+  const end = () => {
+    if (!live) return;
+    live = false;
+    if (!decided) return;
+    freeze(false);
+    clearInline();
+    setDrawer(pos > -w / 2); // past the halfway point → settle open, else closed
+  };
+  addEventListener("touchend", end, { passive: true });
+  addEventListener("touchcancel", end, { passive: true });
+})();
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
