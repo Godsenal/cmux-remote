@@ -59,7 +59,12 @@ async function saveConfig(c: Config) {
 }
 
 const config = await loadConfig();
-webpush.setVapidDetails("mailto:cmux-remote@localhost", config.vapid.publicKey, config.vapid.privateKey);
+
+// Apple's push service rejects the VAPID JWT with 403 BadJwtToken unless `sub` is a
+// genuinely valid mailto: or https: contact — `...@localhost` fails. A real https URL
+// is always accepted; override with a mailto: via CMUX_REMOTE_VAPID_SUBJECT if you like.
+const VAPID_SUBJECT = process.env.CMUX_REMOTE_VAPID_SUBJECT || "https://github.com/Godsenal/cmux-remote";
+webpush.setVapidDetails(VAPID_SUBJECT, config.vapid.publicKey, config.vapid.privateKey);
 
 // --- cmux socket -----------------------------------------------------------
 
@@ -300,7 +305,8 @@ async function pollNotifications() {
     await pushToPhones({
       title: w?.title || n.title || "cmux",
       body: n.body || n.subtitle || "",
-      workspace: w?.ref ?? "",
+      // uuid, not ref — the phone subscribes by stable id, and refs get renumbered.
+      workspace: n.workspace_id || "",
       tag: n.id,
     });
   }

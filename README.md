@@ -101,6 +101,36 @@ the behavior entirely with `CMUX_REMOTE_NO_TAILSCALE=1`.
 
 Build a standalone binary (no Bun needed to run it) with `bun run build` → `./cmux-remote`.
 
+## Autostart
+
+To have the bridge come back on its own after a reboot:
+
+```sh
+./scripts/install-autostart.sh      # undo with --uninstall
+```
+
+This adds one guarded line to `~/.zshrc`. cmux only accepts socket connections from
+processes **spawned under cmux**, and a backgrounded process gets reparented away from
+cmux and loses that access — so the launcher instead opens a **dedicated cmux workspace**
+and runs the server there in the foreground, where it keeps its connection. It fires in
+every cmux terminal (including the ones cmux restores on launch), starts the server once,
+and never starts a second copy. You'll see a `cmux-remote` workspace appear in the sidebar.
+
+The Mac must be awake and on power for the phone to reach it. Closing the lid sleeps it
+(unless an external display keeps it in clamshell); on battery, `caffeinate -s` holds it.
+
+## Known limitation: arrow keys in Claude Code
+
+Arrow keys and `⇧Tab` work in a normal shell (history, line editing) but **not inside
+Claude Code's menus/composer** — there they insert literal `[B` instead of moving.
+
+This is a cmux constraint, not a bug in this app. cmux's socket delivers the `ESC` byte of
+an escape sequence separately from the rest when the target app is in the input modes
+Claude Code uses; Claude Code's parser then reads the lone `ESC` as Escape and the rest as
+text. cmux's own `send_key` API doesn't accept arrows either. Verified exhaustively — no
+reliable socket-level workaround exists. Type/submit, `esc`, `^C`, and `^R` all work in
+Claude Code; use the Mac for heavy menu navigation.
+
 ## Security
 
 `cmux-remote` types arbitrary text into your shells — treat the URL like a live root

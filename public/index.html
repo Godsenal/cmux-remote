@@ -275,11 +275,14 @@ function handle(m) {
   } else if (m.type === "workspaces") {
     workspaces = m.workspaces;
     renderList();
-    if (!current) {
+    // `ref` (workspace:N) is a positional handle that gets renumbered as workspaces
+    // come and go; `id` (uuid) is stable. Subscribe and match by id, or a saved
+    // session silently points at the wrong — or an empty — workspace.
+    if (!current || !workspaces.some((w) => w.id === current)) {
       const pick = workspaces.find((w) => w.selected) || workspaces[0];
-      if (pick) subscribe(pick.ref);
+      if (pick) subscribe(pick.id);
     } else {
-      const w = workspaces.find((x) => x.ref === current);
+      const w = workspaces.find((x) => x.id === current);
       if (w) titleEl.textContent = w.title;
     }
   } else if (m.type === "notifications") {
@@ -310,14 +313,14 @@ function notify(n) {
   }
 }
 
-function subscribe(ref) {
-  current = ref;
-  localStorage.setItem("workspace", ref);
+function subscribe(id) {
+  current = id;
+  localStorage.setItem("workspace", id);
   screenEl.textContent = "";
-  const w = workspaces.find((x) => x.ref === ref);
-  titleEl.textContent = w ? w.title : ref;
+  const w = workspaces.find((x) => x.id === id);
+  titleEl.textContent = w ? w.title : "…";
   renderList();
-  ws?.readyState === 1 && ws.send(JSON.stringify({ type: "subscribe", workspace: ref }));
+  ws?.readyState === 1 && ws.send(JSON.stringify({ type: "subscribe", workspace: id }));
   setDrawer(false);
 }
 
@@ -325,12 +328,12 @@ function renderList() {
   listEl.innerHTML = "";
   for (const w of workspaces) {
     const el = document.createElement("div");
-    el.className = "ws" + (w.ref === current ? " sel" : "");
+    el.className = "ws" + (w.id === current ? " sel" : "");
     const dir = (w.current_directory || "").replace(/^\/Users\/[^/]+/, "~");
     el.innerHTML =
       `<div class="n">${esc(w.title)}</div>` +
       `<div class="d">${esc(dir)}${w.selected ? ' <span class="badge">· 맥에서 열림</span>' : ""}</div>`;
-    el.onclick = () => subscribe(w.ref);
+    el.onclick = () => subscribe(w.id);
     listEl.append(el);
   }
 }
