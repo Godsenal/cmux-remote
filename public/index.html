@@ -63,6 +63,17 @@
      instead of the whole grid shrinking to fit. Only vertical scrolling. */
   #screen.wrap { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 
+  /* Surface (pane/tab) switcher — only shown when a workspace has more than one. */
+  #surfaces {
+    display: flex; gap: 5px; padding: 6px 8px; flex: none;
+    overflow-x: auto; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  #surfaces button {
+    flex: none; padding: 6px 10px; font-size: 12px; max-width: 44vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #surfaces button.sel { border-color: var(--accent); color: var(--accent); }
+
   #keys {
     display: flex; gap: 5px; padding: 6px 8px; flex: none;
     overflow-x: auto; background: var(--panel); border-top: 1px solid var(--line);
@@ -142,6 +153,8 @@
   <div id="dot" aria-label="연결 상태"></div>
 </header>
 
+<div id="surfaces" hidden></div>
+
 <pre id="screen"></pre>
 
 <div id="keys">
@@ -151,8 +164,8 @@
   <button data-k="left">←</button>
   <button data-k="right">→</button>
   <button data-k="tab">tab</button>
-  <button data-k="shift+tab">⇧tab</button>
   <button data-k="enter">⏎</button>
+  <button data-k="clear">지우기</button>
   <button data-k="ctrl+c" class="warn">^C</button>
   <button data-k="ctrl+r">^R</button>
 </div>
@@ -190,7 +203,8 @@ const screenEl = $("#screen"), titleEl = $("#title"), dotEl = $("#dot"), listEl 
 const sidebar = $("#sidebar"), scrim = $("#scrim"), input = $("#input"), toast = $("#toast");
 const fitBtn = $("#fit");
 
-let ws = null, current = null, workspaces = [], toastTimer = null;
+let ws = null, current = null, currentSurface = null, workspaces = [], surfaces = [], toastTimer = null;
+const surfacesEl = $("#surfaces");
 
 // Survives PWA relaunch, where the token is no longer in the URL.
 const urlToken = new URLSearchParams(location.search).get("t");
@@ -252,8 +266,16 @@ function connect() {
 
 function handle(m) {
   if (m.type === "screen") {
-    if (m.workspace !== current) return;
+    if (m.target !== (currentSurface || current)) return;
     paint(m.text);
+  } else if (m.type === "surfaces") {
+    if (m.workspace !== current) return;
+    surfaces = m.surfaces;
+    // A surface we were viewing may have closed on the Mac — fall back to focus.
+    if (currentSurface && !surfaces.some((s) => s.id === currentSurface)) {
+      subscribeSurface(null);
+    }
+    renderSurfaces();
   } else if (m.type === "workspaces") {
     workspaces = m.workspaces;
     renderList();
@@ -296,6 +318,9 @@ function notify(n) {
 
 function subscribe(id) {
   current = id;
+  currentSurface = null; // new workspace → follow its focused surface until told otherwise
+  surfaces = [];
+  renderSurfaces();
   localStorage.setItem("workspace", id);
   screenEl.textContent = "";
   const w = workspaces.find((x) => x.id === id);
@@ -303,6 +328,34 @@ function subscribe(id) {
   renderList();
   ws?.readyState === 1 && ws.send(JSON.stringify({ type: "subscribe", workspace: id }));
   setDrawer(false);
+}
+
+// Narrow to one surface (a pane/tab) within the current workspace, or null for its focus.
+function subscribeSurface(sid) {
+  currentSurface = sid;
+  screenEl.textContent = "";
+  renderSurfaces();
+  ws?.readyState === 1 && ws.send(JSON.stringify({ type: "subscribe", workspace: current, surface: sid }));
+}
+
+function renderSurfaces() {
+  // Only worth showing when a workspace is actually split into more than one surface.
+  if (surfaces.length < 2) {
+    surfacesEl.hidden = true;
+    surfacesEl.innerHTML = "";
+    return;
+  }
+  surfacesEl.hidden = false;
+  surfacesEl.innerHTML = "";
+  surfaces.forEach((s, i) => {
+    const b = document.createElement("button");
+    const active = currentSurface ? s.id === currentSurface : s.focused;
+    b.className = active ? "sel" : "";
+    const label = (s.title || `${s.type} ${i + 1}`).replace(/^.*[@:]/, "").slice(0, 22) || `#${i + 1}`;
+    b.textContent = label;
+    b.onclick = () => subscribeSurface(s.id);
+    surfacesEl.append(b);
+  });
 }
 
 function renderList() {

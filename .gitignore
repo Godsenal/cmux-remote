@@ -4,3 +4,4 @@ cmux-remote
 .DS_Store
 *.png.tmp
 qr-sidebar.png
+_*.png

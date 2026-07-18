@@ -79,6 +79,8 @@ you if you skipped it.
 | **Live screen** | The cmux screen, mirrored and auto-fit to your phone's width. |
 | **Full input** | Type text, plus `esc` `tab` `⇧tab` `↑↓←→` `^C` `^R` `⏎` — every key Claude Code's menus and permission-mode toggle need. |
 | **Workspace switcher** | Every cmux workspace with its live status icon; tap to jump. |
+| **Split panes** | A workspace split into multiple panes shows a surface tab bar; tap to view/drive each one. |
+| **Scrollback** | The phone gets the buffer's history, not just the viewport, so you can scroll up regardless of where the Mac is scrolled. |
 | **Push** | `Claude is waiting for your input` reaches your phone even with the app closed; tapping it deep-links to that workspace. |
 | **Connect another device** | Sidebar QR to onboard a tablet or a second phone without retyping anything. |
 
@@ -119,17 +121,19 @@ and never starts a second copy. You'll see a `cmux-remote` workspace appear in t
 The Mac must be awake and on power for the phone to reach it. Closing the lid sleeps it
 (unless an external display keeps it in clamshell); on battery, `caffeinate -s` holds it.
 
-## Known limitation: arrow keys in Claude Code
+## Navigation keys
 
-Arrow keys and `⇧Tab` work in a normal shell (history, line editing) but **not inside
-Claude Code's menus/composer** — there they insert literal `[B` instead of moving.
+The `↑ ↓ ← →` buttons send emacs/readline control bytes (`Ctrl+P/N/B/F`), not arrow
+escape sequences. cmux's socket splits the `ESC` byte off an escape sequence when the
+target app is in the modes Claude Code uses — arrows arrive as a lone Escape plus literal
+`[B` and corrupt the composer. The Ctrl-key equivalents are single bytes with nothing to
+split, and they drive **both** Claude Code's menus (`Ctrl+P/N` move the selection — so you
+can pick an option and press `⏎`) **and** the shell (history + cursor). `지우기` sends
+`Ctrl+U` to clear the input line.
 
-This is a cmux constraint, not a bug in this app. cmux's socket delivers the `ESC` byte of
-an escape sequence separately from the rest when the target app is in the input modes
-Claude Code uses; Claude Code's parser then reads the lone `ESC` as Escape and the rest as
-text. cmux's own `send_key` API doesn't accept arrows either. Verified exhaustively — no
-reliable socket-level workaround exists. Type/submit, `esc`, `^C`, and `^R` all work in
-Claude Code; use the Mac for heavy menu navigation.
+Trade-off: full-screen apps that read raw arrow keys (vim, less, htop) won't follow these
+— use the Mac for those. `⇧Tab` (Claude Code's permission-mode cycle) is also an escape
+sequence with no control-byte equivalent, so it isn't exposed.
 
 ## Security
 

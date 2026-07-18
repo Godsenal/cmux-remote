@@ -24,6 +24,9 @@ const SOCKET_PATH =
 const PORT = Number(process.env.PORT || 8787);
 const SCREEN_POLL_MS = Number(process.env.SCREEN_POLL_MS || 350);
 const META_POLL_MS = Number(process.env.META_POLL_MS || 2000);
+// Read scrollback, not just the viewport, so the phone can scroll through history
+// no matter where the desktop is scrolled. Capped to bound the payload per poll.
+const SCROLLBACK_LINES = Number(process.env.SCROLLBACK_LINES || 1000);
 
 // --- config ----------------------------------------------------------------
 
@@ -166,23 +169,47 @@ async function onWorkspace(
 }
 
 /**
- * Raw PTY bytes rather than surface.send_key: that method rejects arrow keys and
- * shift+tab, both of which Claude Code needs. surface.send_text passes bytes through
- * untouched, verified with `cat -v`.
+ * Reads/sends to one specific target — a surface (a single pane/tab within a
+ * workspace) when given one, otherwise the workspace's focused surface. Same
+ * guard as onWorkspace: verify cmux acted on the target we asked for, since an
+ * ignored param silently falls back to the selected workspace.
+ */
+async function onTarget(
+  method: string,
+  target: { workspace: string; surface: string | null },
+  params: Record<string, unknown> = {},
+): Promise<any> {
+  if (!target.surface) return onWorkspace(method, target.workspace, params);
+  const res = await cmux.call(method, { surface_id: target.surface, ...params });
+  if (res?.surface_id && res.surface_id !== target.surface) {
+    throw new Error(`${method} targeted surface ${target.surface} but hit ${res.surface_id}`);
+  }
+  return res;
+}
+
+/**
+ * Navigation uses emacs/readline control bytes, not arrow escape sequences.
+ *
+ * cmux's send_text splits the ESC byte of an escape sequence from the rest when the
+ * target app is in the input modes Claude Code uses, so `\x1b[A`/`\x1b[B` arrive as a
+ * lone Escape + literal "[A"/"[B" and corrupt the composer. The Ctrl-key equivalents
+ * are single bytes with no ESC to split, and they drive both Claude Code's menus
+ * (Ctrl+P/N move the selection) and the shell (Ctrl+P/N = history, Ctrl+B/F = cursor).
+ *
+ * Trade-off: full-screen apps that read raw arrows (vim, less) won't follow these —
+ * use the Mac for those. Claude Code, the primary target, works.
  */
 const KEYS: Record<string, string> = {
   enter: "\r",
   esc: "\x1b",
   tab: "\t",
-  "shift+tab": "\x1b[Z",
-  up: "\x1b[A",
-  down: "\x1b[B",
-  right: "\x1b[C",
-  left: "\x1b[D",
+  up: "\x10", // Ctrl+P
+  down: "\x0e", // Ctrl+N
+  left: "\x02", // Ctrl+B
+  right: "\x06", // Ctrl+F
+  clear: "\x15", // Ctrl+U — clear the input line
   "ctrl+c": "\x03",
-  "ctrl+d": "\x04",
   "ctrl+r": "\x12",
-  "ctrl+u": "\x15",
   backspace: "\x7f",
 };
 
@@ -222,8 +249,11 @@ async function pushToPhones(payload: Record<string, unknown>) {
 
 // --- clients ---------------------------------------------------------------
 
-type ClientData = { workspace: string | null };
+type ClientData = { workspace: string | null; surface: string | null };
 const clients = new Set<any>();
+
+/** What a client is currently viewing: a specific surface, or a workspace's focus. */
+const targetKey = (d: ClientData) => d.surface || d.workspace || "";
 
 function send(ws: any, type: string, payload: Record<string, unknown>) {
   try {
@@ -243,23 +273,61 @@ const broadcast = (type: string, payload: Record<string, unknown>) => {
 const lastScreen = new Map<string, string>();
 
 async function pollScreens() {
-  const wanted = new Set<string>();
-  for (const ws of clients) if (ws.data.workspace) wanted.add(ws.data.workspace);
-  for (const key of lastScreen.keys()) if (!wanted.has(key)) lastScreen.delete(key);
+  // Dedupe the distinct targets clients are viewing (a surface, or a workspace focus).
+  const targets = new Map<string, ClientData>();
+  for (const ws of clients) {
+    if (ws.data.workspace) targets.set(targetKey(ws.data), ws.data);
+  }
+  for (const key of lastScreen.keys()) if (!targets.has(key)) lastScreen.delete(key);
 
   await Promise.all(
-    [...wanted].map(async (workspace) => {
+    [...targets].map(async ([key, target]) => {
       let text: string;
       try {
-        text = (await onWorkspace("surface.read_text", workspace))?.text ?? "";
+        text = (await onTarget("surface.read_text", target, {
+          scrollback: true,
+          lines: SCROLLBACK_LINES,
+        }))?.text ?? "";
       } catch {
         return;
       }
 
-      if (lastScreen.get(workspace) === text) return;
-      lastScreen.set(workspace, text);
+      if (lastScreen.get(key) === text) return;
+      lastScreen.set(key, text);
       for (const ws of clients) {
-        if (ws.data.workspace === workspace) send(ws, "screen", { workspace, text });
+        if (targetKey(ws.data) === key) send(ws, "screen", { target: key, text });
+      }
+    }),
+  );
+}
+
+/** Per-workspace list of surfaces (panes/tabs), pushed to clients so they can switch. */
+const lastSurfaces = new Map<string, string>();
+
+async function pollSurfaces() {
+  const wanted = new Set<string>();
+  for (const ws of clients) if (ws.data.workspace) wanted.add(ws.data.workspace);
+  for (const key of lastSurfaces.keys()) if (!wanted.has(key)) lastSurfaces.delete(key);
+
+  await Promise.all(
+    [...wanted].map(async (workspace) => {
+      let surfaces: any[];
+      try {
+        surfaces = (await onWorkspace("surface.list", workspace))?.surfaces ?? [];
+      } catch {
+        return;
+      }
+      const slim = surfaces.map((s) => ({
+        id: s.id,
+        title: s.title,
+        type: s.type,
+        focused: !!s.focused,
+      }));
+      const json = JSON.stringify(slim);
+      if (lastSurfaces.get(workspace) === json) return;
+      lastSurfaces.set(workspace, json);
+      for (const ws of clients) {
+        if (ws.data.workspace === workspace) send(ws, "surfaces", { workspace, surfaces: slim });
       }
     }),
   );
@@ -321,6 +389,7 @@ function loop(fn: () => Promise<void>, ms: number) {
 }
 
 loop(pollScreens, SCREEN_POLL_MS);
+loop(pollSurfaces, META_POLL_MS);
 loop(pollWorkspaces, META_POLL_MS);
 loop(pollNotifications, META_POLL_MS);
 
@@ -344,7 +413,7 @@ const server = Bun.serve<ClientData>({
 
     if (url.pathname === "/ws") {
       if (!authorized(req, url)) return new Response("unauthorized", { status: 401 });
-      if (server.upgrade(req, { data: { workspace: null } })) return;
+      if (server.upgrade(req, { data: { workspace: null, surface: null } })) return;
       return new Response("upgrade failed", { status: 400 });
     }
 
@@ -429,14 +498,17 @@ const server = Bun.serve<ClientData>({
 
       try {
         if (msg.type === "subscribe") {
+          // A new workspace resets the surface to the workspace's focus; an explicit
+          // surface (a pane/tab) narrows to just that one.
           ws.data.workspace = msg.workspace;
-          lastScreen.delete(msg.workspace); // force a repaint for the new subscriber
-          await pollScreens();
+          ws.data.surface = msg.surface ?? null;
+          lastScreen.delete(targetKey(ws.data)); // force a repaint for the new view
+          await Promise.all([pollScreens(), pollSurfaces()]);
         } else if (msg.type === "send" && ws.data.workspace) {
-          await onWorkspace("surface.send_text", ws.data.workspace, { text: msg.text });
+          await onTarget("surface.send_text", ws.data, { text: msg.text });
         } else if (msg.type === "key" && ws.data.workspace) {
           const bytes = KEYS[msg.key];
-          if (bytes) await onWorkspace("surface.send_text", ws.data.workspace, { text: bytes });
+          if (bytes) await onTarget("surface.send_text", ws.data, { text: bytes });
         } else if (msg.type === "select" && msg.workspace) {
           await onWorkspace("workspace.select", msg.workspace);
         }
