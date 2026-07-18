@@ -624,7 +624,14 @@ const server = Bun.serve<ClientData>({
           lastScreen.delete(targetKey(ws.data)); // force a repaint for the new view
           await Promise.all([pollScreens(), pollSurfaces()]);
         } else if (msg.type === "send" && ws.data.workspace) {
-          await onTarget("surface.send_text", ws.data, { text: msg.text });
+          // Multi-line input must arrive as one paste. Sent raw, each newline acts as a
+          // separate Enter, so the target (Claude Code, the shell) takes the lines one at
+          // a time and queues them. cmux's `bracketed` flag wraps the text as a single
+          // bracketed paste (handled internally, so no escape sequences get mangled); the
+          // client's follow-up Enter then submits it as one message.
+          const text = String(msg.text ?? "");
+          const params = text.includes("\n") ? { text, bracketed: true } : { text };
+          await onTarget("surface.send_text", ws.data, params);
         } else if (msg.type === "key" && ws.data.workspace) {
           const bytes = KEYS[msg.key];
           if (bytes) await onTarget("surface.send_text", ws.data, { text: bytes });
