@@ -111,11 +111,19 @@
   #newws { margin: 6px 8px 0; padding: 10px; font-size: 13px; color: var(--accent); border-color: var(--accent); }
   #wslist { flex: 1; overflow: auto; padding: 6px; }
   .ws {
-    padding: 11px 12px; border-radius: 8px; cursor: pointer;
-    display: flex; flex-direction: column; gap: 3px;
+    padding: 8px 6px 8px 12px; border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; gap: 6px;
   }
+  .ws-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
   .ws:active { background: #222933; }
   .ws.sel { background: #1d2733; box-shadow: inset 2px 0 0 var(--accent); }
+  /* Per-workspace push toggle: dimmed 🔕 when off (the default), lit 🔔 when on. */
+  .bell {
+    flex: none; background: none; border: none; padding: 6px 8px;
+    font-size: 17px; line-height: 1; opacity: .4; filter: grayscale(1);
+  }
+  .bell:active { background: #222933; }
+  .bell.on { opacity: 1; filter: none; }
   .ws .n { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ws .d { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ws .badge { color: var(--accent); font-size: 11px; }
@@ -194,7 +202,6 @@
   <div id="wslist"></div>
   <div id="pushbar">
     <button id="pushbtn">알림 켜기</button>
-    <button id="pushtest" hidden style="margin-top:8px">테스트 알림 보내기</button>
     <div id="pushnote"></div>
     <button id="qrbtn" style="margin-top:8px">다른 기기 연결 (QR)</button>
     <div id="qrbox" hidden>
@@ -213,6 +220,7 @@ const sidebar = $("#sidebar"), scrim = $("#scrim"), input = $("#input"), toast =
 const fitBtn = $("#fit");
 
 let ws = null, current = null, currentSurface = null, workspaces = [], surfaces = [], toastTimer = null;
+let notifySet = new Set(); // workspace ids with push turned on (server-authoritative)
 let screenText = ""; // full text of the viewed target, kept in sync via deltas
 const surfacesEl = $("#surfaces");
 
@@ -319,6 +327,9 @@ function handle(m) {
       subscribeSurface(m.surface);
       showToast("새 탭을 만들었습니다.");
     }
+  } else if (m.type === "notify-state") {
+    notifySet = new Set(m.workspaces || []);
+    renderList();
   } else if (m.type === "notifications") {
     for (const n of m.items) notify(n);
   } else if (m.type === "error") {
@@ -395,11 +406,27 @@ function renderList() {
   for (const w of workspaces) {
     const el = document.createElement("div");
     el.className = "ws" + (w.id === current ? " sel" : "");
+    el.onclick = () => subscribe(w.id);
+
     const dir = (w.current_directory || "").replace(/^\/Users\/[^/]+/, "~");
-    el.innerHTML =
+    const main = document.createElement("div");
+    main.className = "ws-main";
+    main.innerHTML =
       `<div class="n">${esc(w.title)}</div>` +
       `<div class="d">${esc(dir)}${w.selected ? ' <span class="badge">· 맥에서 열림</span>' : ""}</div>`;
-    el.onclick = () => subscribe(w.id);
+
+    // Per-workspace push toggle. Off by default; tapping doesn't switch workspace.
+    const on = notifySet.has(w.id);
+    const bell = document.createElement("button");
+    bell.className = "bell" + (on ? " on" : "");
+    bell.textContent = on ? "🔔" : "🔕";
+    bell.setAttribute("aria-label", on ? "이 워크스페이스 알림 끄기" : "이 워크스페이스 알림 켜기");
+    bell.onclick = (e) => {
+      e.stopPropagation();
+      if (ws?.readyState === 1) ws.send(JSON.stringify({ type: "notify-toggle", workspace: w.id, on: !on }));
+    };
+
+    el.append(main, bell);
     listEl.append(el);
   }
 }
@@ -439,7 +466,7 @@ $("#newws").onclick = () => {
 // --- push -----------------------------------------------------------------
 
 const VAPID_PUBLIC_KEY = "__VAPID_PUBLIC_KEY__";
-const pushBtn = $("#pushbtn"), pushTest = $("#pushtest"), pushNote = $("#pushnote");
+const pushBtn = $("#pushbtn"), pushNote = $("#pushnote");
 
 const urlB64ToBytes = (b64) => {
   const padded = (b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
@@ -467,7 +494,6 @@ async function refreshPushUI() {
     pushBtn.disabled = true;
     pushBtn.textContent = "알림 사용 불가";
     pushBtn.classList.remove("on");
-    pushTest.hidden = true;
     pushNote.className = "warn";
     pushNote.textContent = blocker;
     return;
@@ -480,11 +506,10 @@ async function refreshPushUI() {
   pushBtn.disabled = false;
   pushBtn.textContent = on ? "알림 끄기" : "알림 켜기";
   pushBtn.classList.toggle("on", on);
-  pushTest.hidden = !on; // testing only makes sense while notifications are on
   pushNote.className = "";
   pushNote.textContent = on
-    ? "켜짐 — Claude Code가 입력을 기다리면 앱이 꺼져 있어도 폰이 울립니다."
-    : "Claude Code가 입력을 기다릴 때 폰으로 알림을 받습니다.";
+    ? "이 기기 알림 켜짐 — 목록에서 🔔 켠 워크스페이스만 폰으로 알립니다."
+    : "먼저 이 기기의 알림을 켠 뒤, 워크스페이스별로 🔔를 켜세요.";
 }
 
 // The main button toggles push: subscribe when off, unsubscribe when on.
@@ -525,15 +550,6 @@ pushBtn.onclick = async () => {
     pushNote.textContent = "알림 설정 실패: " + err;
   }
   refreshPushUI();
-};
-
-pushTest.onclick = async () => {
-  try {
-    await fetch("/push/test", { method: "POST" });
-    showToast("테스트 푸시를 보냈습니다.");
-  } catch (err) {
-    showToast("테스트 실패: " + err);
-  }
 };
 
 navigator.serviceWorker?.addEventListener("message", (e) => {

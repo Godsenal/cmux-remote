@@ -37,6 +37,9 @@ type Config = {
   token: string;
   vapid: { publicKey: string; privateKey: string };
   subscriptions: Sub[];
+  // Workspace ids allowed to send push. Opt-in: a workspace not listed here stays
+  // silent, so the default for every workspace (and every new one) is notifications off.
+  notifyWorkspaces: string[];
 };
 
 const CONFIG_DIR = `${homedir()}/.cmux-remote`;
@@ -46,12 +49,14 @@ async function loadConfig(): Promise<Config> {
   const file = Bun.file(CONFIG_FILE);
   if (await file.exists()) {
     const saved = await file.json();
-    if (saved.token && saved.vapid?.privateKey) return { subscriptions: [], ...saved };
+    if (saved.token && saved.vapid?.privateKey)
+      return { subscriptions: [], notifyWorkspaces: [], ...saved };
   }
   const fresh: Config = {
     token: crypto.randomUUID().replaceAll("-", "").slice(0, 20),
     vapid: webpush.generateVAPIDKeys(),
     subscriptions: [],
+    notifyWorkspaces: [],
   };
   await saveConfig(fresh);
   return fresh;
@@ -389,9 +394,16 @@ async function pollNotifications() {
   for (const n of items) seenNotifications.add(n.id);
   if (!fresh.length) return;
 
-  broadcast("notifications", { items: fresh });
+  // Per-workspace opt-in: only alert for workspaces the user turned on. Everything is
+  // still marked seen above, so enabling a workspace never replays its backlog — it
+  // starts notifying from the next alert on.
+  const enabled = new Set(config.notifyWorkspaces);
+  const allowed = fresh.filter((n) => enabled.has(n.workspace_id));
+  if (!allowed.length) return;
 
-  for (const n of fresh) {
+  broadcast("notifications", { items: allowed });
+
+  for (const n of allowed) {
     const w = workspaceCache.find((x) => x.id === n.workspace_id);
     await pushToPhones({
       title: w?.title || n.title || "cmux",
@@ -493,11 +505,6 @@ const server = Bun.serve<ClientData>({
       return Response.json({ ok: true, count: config.subscriptions.length });
     }
 
-    if (url.pathname === "/push/test" && req.method === "POST") {
-      await pushToPhones({ title: "cmux remote", body: "푸시 알림이 정상 동작합니다.", tag: "test" });
-      return Response.json({ ok: true, sent: config.subscriptions.length });
-    }
-
     if (url.pathname === "/") {
       return new Response(page, {
         headers: {
@@ -514,6 +521,7 @@ const server = Bun.serve<ClientData>({
   websocket: {
     open(ws) {
       clients.add(ws);
+      send(ws, "notify-state", { workspaces: config.notifyWorkspaces });
       pollWorkspaces();
     },
     close(ws) {
@@ -563,6 +571,16 @@ const server = Bun.serve<ClientData>({
             send(ws, "created", { kind: "workspace", workspace });
             await pollWorkspaces(); // broadcast the new list so every client sees it
           }
+        } else if (msg.type === "notify-toggle" && msg.workspace) {
+          // Turn push on/off for one workspace. Global (not per-device) — it decides
+          // which sessions are allowed to ping at all; the master push button decides
+          // whether this phone is subscribed to receive them.
+          const set = new Set(config.notifyWorkspaces);
+          if (msg.on) set.add(msg.workspace);
+          else set.delete(msg.workspace);
+          config.notifyWorkspaces = [...set];
+          await saveConfig(config);
+          broadcast("notify-state", { workspaces: config.notifyWorkspaces });
         } else if (msg.type === "resync") {
           // Client detected a delta it couldn't apply — drop the baseline so the next
           // poll resends the full screen to everyone on this target.
