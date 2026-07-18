@@ -42,6 +42,8 @@
   }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); flex: none; }
   #dot.on { background: #9ece6a; }
+  /* New-tab (surface) button in the header — a terminal in the current workspace. */
+  #newtab { flex: none; padding: 5px 10px; font-size: 16px; line-height: 1; }
 
   button {
     background: #1e242c; color: var(--fg); border: 1px solid var(--line);
@@ -105,6 +107,8 @@
     opacity: 0; pointer-events: none; transition: opacity .2s;
   }
   #scrim.open { opacity: 1; pointer-events: auto; }
+  /* New-workspace button — a fresh sidebar workspace in the current repo's directory. */
+  #newws { margin: 6px 8px 0; padding: 10px; font-size: 13px; color: var(--accent); border-color: var(--accent); }
   #wslist { flex: 1; overflow: auto; padding: 6px; }
   .ws {
     padding: 11px 12px; border-radius: 8px; cursor: pointer;
@@ -150,6 +154,7 @@
 <header>
   <button id="menu" aria-label="워크스페이스 목록">☰</button>
   <div id="title">연결 중…</div>
+  <button id="newtab" aria-label="새 탭">＋</button>
   <div id="dot" aria-label="연결 상태"></div>
 </header>
 
@@ -183,6 +188,7 @@
     <button id="fdec" aria-label="글자 작게">A−</button>
     <button id="finc" aria-label="글자 크게">A+</button>
   </div>
+  <button id="newws">＋ 새 워크스페이스</button>
   <div id="wslist"></div>
   <div id="pushbar">
     <button id="pushbtn">알림 켜기</button>
@@ -204,6 +210,7 @@ const sidebar = $("#sidebar"), scrim = $("#scrim"), input = $("#input"), toast =
 const fitBtn = $("#fit");
 
 let ws = null, current = null, currentSurface = null, workspaces = [], surfaces = [], toastTimer = null;
+let screenText = ""; // full text of the viewed target, kept in sync via deltas
 const surfacesEl = $("#surfaces");
 
 // Survives PWA relaunch, where the token is no longer in the URL.
@@ -267,7 +274,18 @@ function connect() {
 function handle(m) {
   if (m.type === "screen") {
     if (m.target !== (currentSurface || current)) return;
-    paint(m.text);
+    if (m.full !== undefined) {
+      screenText = m.full;
+    } else {
+      // Reconstruct from the common prefix/suffix delta the server sent.
+      const next = screenText.slice(0, m.p) + m.mid + screenText.slice(screenText.length - m.s);
+      if (next.length !== m.len) { // out of sync — ask for a full resend
+        ws?.readyState === 1 && ws.send(JSON.stringify({ type: "resync" }));
+        return;
+      }
+      screenText = next;
+    }
+    paint(screenText);
   } else if (m.type === "surfaces") {
     if (m.workspace !== current) return;
     surfaces = m.surfaces;
@@ -288,6 +306,15 @@ function handle(m) {
     } else {
       const w = workspaces.find((x) => x.id === current);
       if (w) titleEl.textContent = w.title;
+    }
+  } else if (m.type === "created") {
+    // Jump straight into whatever we just created.
+    if (m.kind === "workspace" && m.workspace) {
+      subscribe(m.workspace);
+      showToast("새 워크스페이스를 만들었습니다.");
+    } else if (m.kind === "surface" && m.surface && m.workspace === current) {
+      subscribeSurface(m.surface);
+      showToast("새 탭을 만들었습니다.");
     }
   } else if (m.type === "notifications") {
     for (const n of m.items) notify(n);
@@ -322,6 +349,7 @@ function subscribe(id) {
   surfaces = [];
   renderSurfaces();
   localStorage.setItem("workspace", id);
+  screenText = "";
   screenEl.textContent = "";
   const w = workspaces.find((x) => x.id === id);
   titleEl.textContent = w ? w.title : "…";
@@ -333,6 +361,7 @@ function subscribe(id) {
 // Narrow to one surface (a pane/tab) within the current workspace, or null for its focus.
 function subscribeSurface(sid) {
   currentSurface = sid;
+  screenText = "";
   screenEl.textContent = "";
   renderSurfaces();
   ws?.readyState === 1 && ws.send(JSON.stringify({ type: "subscribe", workspace: current, surface: sid }));
@@ -392,6 +421,17 @@ $("#send").onclick = sendText;
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); sendText(); }
 });
+
+// Create a new terminal ("tab") in the current workspace, or a whole new workspace.
+// The server replies with a `created` message carrying the new id to jump to.
+$("#newtab").onclick = () => {
+  if (!current || ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: "new-surface" }));
+};
+$("#newws").onclick = () => {
+  if (ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: "new-workspace" }));
+};
 
 // --- push -----------------------------------------------------------------
 

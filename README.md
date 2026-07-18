@@ -79,6 +79,7 @@ you if you skipped it.
 | **Live screen** | The cmux screen, mirrored and auto-fit to your phone's width. |
 | **Full input** | Type text, plus `esc` `tab` `⇧tab` `↑↓←→` `^C` `^R` `⏎` — every key Claude Code's menus and permission-mode toggle need. |
 | **Workspace switcher** | Every cmux workspace with its live status icon; tap to jump. |
+| **New tab / workspace** | `＋` in the header opens another terminal in the current workspace; the sidebar's **새 워크스페이스** spins up a fresh workspace in the same directory — created unselected, so it never yanks focus on the Mac. |
 | **Split panes** | A workspace split into multiple panes shows a surface tab bar; tap to view/drive each one. |
 | **Scrollback** | The phone gets the buffer's history, not just the viewport, so you can scroll up regardless of where the Mac is scrolled. |
 | **Push** | `Claude is waiting for your input` reaches your phone even with the app closed; tapping it deep-links to that workspace. |

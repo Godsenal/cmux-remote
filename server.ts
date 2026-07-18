@@ -25,8 +25,9 @@ const PORT = Number(process.env.PORT || 8787);
 const SCREEN_POLL_MS = Number(process.env.SCREEN_POLL_MS || 350);
 const META_POLL_MS = Number(process.env.META_POLL_MS || 2000);
 // Read scrollback, not just the viewport, so the phone can scroll through history
-// no matter where the desktop is scrolled. Capped to bound the payload per poll.
-const SCROLLBACK_LINES = Number(process.env.SCROLLBACK_LINES || 1000);
+// no matter where the desktop is scrolled. The cap can be generous because screen
+// updates are sent as deltas (see pollScreens) — only a fresh subscribe pays the full.
+const SCROLLBACK_LINES = Number(process.env.SCROLLBACK_LINES || 5000);
 
 // --- config ----------------------------------------------------------------
 
@@ -272,6 +273,23 @@ const broadcast = (type: string, payload: Record<string, unknown>) => {
 /** cmux exposes no terminal output stream, so live screens are polled and diffed. */
 const lastScreen = new Map<string, string>();
 
+/**
+ * Between polls only the viewport churns — the scrollback above it is written once
+ * and then unchanged. So instead of resending the whole buffer (up to SCROLLBACK_LINES)
+ * every 350ms, send just the region that differs: the common prefix and suffix stay,
+ * only the middle is transmitted. Lets the scrollback cap be large without the payload.
+ */
+function diff(oldStr: string, next: string) {
+  const oLen = oldStr.length, nLen = next.length;
+  let p = 0;
+  const pMax = Math.min(oLen, nLen);
+  while (p < pMax && oldStr.charCodeAt(p) === next.charCodeAt(p)) p++;
+  let s = 0;
+  const sMax = Math.min(oLen - p, nLen - p);
+  while (s < sMax && oldStr.charCodeAt(oLen - 1 - s) === next.charCodeAt(nLen - 1 - s)) s++;
+  return { p, s, mid: next.slice(p, nLen - s), len: nLen };
+}
+
 async function pollScreens() {
   // Dedupe the distinct targets clients are viewing (a surface, or a workspace focus).
   const targets = new Map<string, ClientData>();
@@ -292,10 +310,15 @@ async function pollScreens() {
         return;
       }
 
-      if (lastScreen.get(key) === text) return;
+      const prev = lastScreen.get(key);
+      if (prev === text) return;
       lastScreen.set(key, text);
+
+      // Fresh target (no baseline) → send the whole thing; otherwise send a delta.
+      const payload =
+        prev === undefined ? { target: key, full: text } : { target: key, ...diff(prev, text) };
       for (const ws of clients) {
-        if (targetKey(ws.data) === key) send(ws, "screen", { target: key, text });
+        if (targetKey(ws.data) === key) send(ws, "screen", payload);
       }
     }),
   );
@@ -511,6 +534,32 @@ const server = Bun.serve<ClientData>({
           if (bytes) await onTarget("surface.send_text", ws.data, { text: bytes });
         } else if (msg.type === "select" && msg.workspace) {
           await onWorkspace("workspace.select", msg.workspace);
+        } else if (msg.type === "new-surface" && ws.data.workspace) {
+          // A new terminal ("tab") in the focused pane of the workspace being viewed.
+          // Inherit that workspace's directory so the new shell starts in the same repo.
+          const cwd = workspaceCache.find((w) => w.id === ws.data.workspace)?.current_directory;
+          const res = await onWorkspace("surface.create", ws.data.workspace, cwd ? { cwd } : {});
+          const surface = res?.surface_id;
+          if (surface) {
+            send(ws, "created", { kind: "surface", workspace: ws.data.workspace, surface });
+            await Promise.all([pollSurfaces(), pollScreens()]); // reflect it without waiting a poll
+          }
+        } else if (msg.type === "new-workspace") {
+          // A fresh workspace, opened in the currently-viewed workspace's directory when there
+          // is one (so "new workspace" means "another agent on this repo"), else cmux's default.
+          // workspace.create leaves it unselected, so the Mac's focus doesn't move.
+          const cwd = workspaceCache.find((w) => w.id === ws.data.workspace)?.current_directory;
+          const res = await cmux.call("workspace.create", cwd ? { cwd } : {});
+          const workspace = res?.workspace_id;
+          if (workspace) {
+            send(ws, "created", { kind: "workspace", workspace });
+            await pollWorkspaces(); // broadcast the new list so every client sees it
+          }
+        } else if (msg.type === "resync") {
+          // Client detected a delta it couldn't apply — drop the baseline so the next
+          // poll resends the full screen to everyone on this target.
+          lastScreen.delete(targetKey(ws.data));
+          await pollScreens();
         }
       } catch (err) {
         send(ws, "error", { message: String(err) });
