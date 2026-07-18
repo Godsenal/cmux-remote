@@ -93,6 +93,11 @@ your URL stays stable across restarts — which is what lets the installed PWA k
 | `CMUX_SOCKET_PATH` | auto (set by cmux) | override the cmux socket |
 | `SCREEN_POLL_MS` | `350` | screen refresh interval |
 | `META_POLL_MS` | `2000` | workspace list + notification interval |
+| `CMUX_REMOTE_NO_TAILSCALE` | unset | set to skip auto-`tailscale serve` (still uses an existing mapping) |
+
+On startup, if `tailscale serve` isn't wired for this port, `cmux-remote` sets it up for
+you. It never overwrites an existing mapping to a different backend, and you can disable
+the behavior entirely with `CMUX_REMOTE_NO_TAILSCALE=1`.
 
 Build a standalone binary (no Bun needed to run it) with `bun run build` → `./cmux-remote`.
 

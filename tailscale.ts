@@ -85,6 +85,16 @@ export async function resolveTailscale(port: number): Promise<TailscaleResult> {
     }
   }
 
+  // Opt out of touching the user's `tailscale serve` config. We still use an existing
+  // mapping (handled above); we just won't create one.
+  if (process.env.CMUX_REMOTE_NO_TAILSCALE) {
+    return {
+      kind: "needs-setup",
+      reason: "auto-serve disabled (CMUX_REMOTE_NO_TAILSCALE). Wire it yourself:",
+      command: `${bin} serve --bg ${port}`,
+    };
+  }
+
   // Serve is empty — try to enable it for our port.
   const set = await run(bin, ["serve", "--bg", String(port)]);
   if (set.ok) return { kind: "url", url };
