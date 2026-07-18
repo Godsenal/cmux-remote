@@ -25,9 +25,11 @@ const PORT = Number(process.env.PORT || 8787);
 const SCREEN_POLL_MS = Number(process.env.SCREEN_POLL_MS || 350);
 const META_POLL_MS = Number(process.env.META_POLL_MS || 2000);
 // Read scrollback, not just the viewport, so the phone can scroll through history
-// no matter where the desktop is scrolled. The cap can be generous because screen
-// updates are sent as deltas (see pollScreens) — only a fresh subscribe pays the full.
-const SCROLLBACK_LINES = Number(process.env.SCROLLBACK_LINES || 5000);
+// no matter where the desktop is scrolled. The cap is generous — scrolling up should
+// reach the whole session — and cheap: updates are sent as deltas (see pollScreens),
+// so only a fresh subscribe pays the full, and the real size is bounded by cmux's own
+// buffer anyway (asking for more lines than it keeps just returns what it has).
+const SCROLLBACK_LINES = Number(process.env.SCROLLBACK_LINES || 50000);
 
 // --- config ----------------------------------------------------------------
 
@@ -350,6 +352,7 @@ async function pollSurfaces() {
         title: s.title,
         type: s.type,
         focused: !!s.focused,
+        pane: s.pane_ref, // lets the phone mark surfaces in other panes as splits, not tabs
       }));
       const json = JSON.stringify(slim);
       if (lastSurfaces.get(workspace) === json) return;
@@ -627,6 +630,23 @@ const server = Bun.serve<ClientData>({
           if (surface) {
             send(ws, "created", { kind: "surface", workspace: ws.data.workspace, surface });
             await Promise.all([pollSurfaces(), pollScreens()]); // reflect it without waiting a poll
+          }
+        } else if (msg.type === "new-split" && ws.data.workspace) {
+          // Split the viewed surface (or the workspace's focused one) into a new pane —
+          // unlike new-surface (a tab in the same pane), a split shows up side-by-side on
+          // the Mac. surface.split needs an explicit surface_id, so resolve it first.
+          let surfaceId = ws.data.surface;
+          if (!surfaceId) {
+            const list = (await onWorkspace("surface.list", ws.data.workspace))?.surfaces ?? [];
+            surfaceId = (list.find((s: any) => s.focused) ?? list[0])?.id ?? null;
+          }
+          if (surfaceId) {
+            const res = await cmux.call("surface.split", { surface_id: surfaceId, direction: "right" });
+            const surface = res?.surface_id;
+            if (surface) {
+              send(ws, "created", { kind: "split", workspace: ws.data.workspace, surface });
+              await Promise.all([pollSurfaces(), pollScreens()]);
+            }
           }
         } else if (msg.type === "new-workspace") {
           // A fresh workspace, opened in the currently-viewed workspace's directory when there

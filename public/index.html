@@ -76,6 +76,8 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #surfaces button.sel { border-color: var(--accent); color: var(--accent); }
+  /* A split (surface in another pane) reads distinct from a tab of the current pane. */
+  #surfaces button.split { border-style: dashed; }
 
   #keys {
     display: flex; gap: 5px; padding: 6px 8px; flex: none;
@@ -173,6 +175,7 @@
   <button id="menu" aria-label="워크스페이스 목록">☰</button>
   <div id="title">연결 중…</div>
   <button id="newtab" aria-label="새 탭">＋</button>
+  <button id="split" aria-label="분할">⧉</button>
   <div id="dot" aria-label="연결 상태"></div>
 </header>
 
@@ -385,6 +388,9 @@ function handle(m) {
     } else if (m.kind === "surface" && m.surface && m.workspace === current) {
       subscribeSurface(m.surface);
       showToast("새 탭을 만들었습니다.");
+    } else if (m.kind === "split" && m.surface && m.workspace === current) {
+      subscribeSurface(m.surface);
+      showToast("분할했습니다.");
     }
   } else if (m.type === "notify-state") {
     notifySet = new Set(m.workspaces || []);
@@ -453,12 +459,19 @@ function renderSurfaces() {
   }
   surfacesEl.hidden = false;
   surfacesEl.innerHTML = "";
+  // A surface in a different pane than the one in view is a split, not a tab of the
+  // current pane — mark those with ⧉ so splits are visibly distinct from tabs.
+  const cur = surfaces.find((s) => (currentSurface ? s.id === currentSurface : s.focused));
+  const curPane = cur?.pane;
+  const multiPane = new Set(surfaces.map((s) => s.pane)).size > 1;
   surfaces.forEach((s, i) => {
     const b = document.createElement("button");
     const active = currentSurface ? s.id === currentSurface : s.focused;
     b.className = active ? "sel" : "";
     const label = (s.title || `${s.type} ${i + 1}`).replace(/^.*[@:]/, "").slice(0, 22) || `#${i + 1}`;
-    b.textContent = label;
+    const isSplit = multiPane && s.pane !== curPane;
+    b.textContent = (isSplit ? "⧉ " : "") + label;
+    if (isSplit) b.classList.add("split");
     b.onclick = () => subscribeSurface(s.id);
     surfacesEl.append(b);
   });
@@ -533,6 +546,11 @@ input.addEventListener("input", autoGrow);
 $("#newtab").onclick = () => {
   if (!current || ws?.readyState !== 1) return;
   ws.send(JSON.stringify({ type: "new-surface" }));
+};
+// Split the current view into a new pane — shows side-by-side on the Mac.
+$("#split").onclick = () => {
+  if (!current || ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: "new-split" }));
 };
 $("#newws").onclick = () => {
   if (ws?.readyState !== 1) return;
