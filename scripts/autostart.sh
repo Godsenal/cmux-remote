@@ -52,8 +52,9 @@ fi
 
 # Open a dedicated workspace and run the server there (foreground → keeps ancestry).
 LOG="$STATE_DIR/server.log"
-"$CMUX_BIN" new-workspace --cwd "$CMUX_REMOTE_DIR" \
-  --command "PORT=$CMUX_REMOTE_PORT $RUN 2>&1 | tee '$LOG'" >/dev/null 2>&1
+NEW_WS="$("$CMUX_BIN" new-workspace --cwd "$CMUX_REMOTE_DIR" \
+  --command "PORT=$CMUX_REMOTE_PORT $RUN 2>&1 | tee '$LOG'" 2>/dev/null | grep -oE 'workspace:[0-9]+' | head -1)"
+[ -n "$NEW_WS" ] && "$CMUX_BIN" rename-workspace --workspace "$NEW_WS" "⚡ cmux-remote" >/dev/null 2>&1
 
 # Hold the lock until the port is actually up, so a concurrent terminal doesn't
 # also spawn one during the few seconds before it binds.
