@@ -43,17 +43,11 @@ if [ ! -d "$CMUX_REMOTE_DIR" ] || [ ! -x "$CMUX_BIN" ]; then
   rmdir "$LOCK" 2>/dev/null; return 0 2>/dev/null || exit 0
 fi
 
-# Prefer the compiled binary; fall back to `bun run`.
-if [ -x "$CMUX_REMOTE_DIR/cmux-remote" ]; then
-  RUN="exec ./cmux-remote"
-else
-  RUN="exec bun run server.ts"
-fi
-
-# Open a dedicated workspace and run the server there (foreground → keeps ancestry).
+# Open a dedicated workspace and run the update-and-run loop there. run.sh stays in
+# the foreground (keeping cmux ancestry) and pulls/rebuilds/restarts on new versions.
 LOG="$STATE_DIR/server.log"
 NEW_WS="$("$CMUX_BIN" new-workspace --cwd "$CMUX_REMOTE_DIR" \
-  --command "PORT=$CMUX_REMOTE_PORT $RUN 2>&1 | tee '$LOG'" 2>/dev/null | grep -oE 'workspace:[0-9]+' | head -1)"
+  --command "CMUX_REMOTE_DIR='$CMUX_REMOTE_DIR' CMUX_REMOTE_PORT=$CMUX_REMOTE_PORT exec zsh '$CMUX_REMOTE_DIR/scripts/run.sh' 2>&1 | tee '$LOG'" 2>/dev/null | grep -oE 'workspace:[0-9]+' | head -1)"
 [ -n "$NEW_WS" ] && "$CMUX_BIN" rename-workspace --workspace "$NEW_WS" "⚡ cmux-remote" >/dev/null 2>&1
 
 # Hold the lock until the port is actually up, so a concurrent terminal doesn't

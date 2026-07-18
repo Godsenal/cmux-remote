@@ -115,12 +115,25 @@ To have the bridge come back on its own after a reboot:
 This adds one guarded line to `~/.zshrc`. cmux only accepts socket connections from
 processes **spawned under cmux**, and a backgrounded process gets reparented away from
 cmux and loses that access — so the launcher instead opens a **dedicated cmux workspace**
-and runs the server there in the foreground, where it keeps its connection. It fires in
-every cmux terminal (including the ones cmux restores on launch), starts the server once,
-and never starts a second copy. You'll see a `cmux-remote` workspace appear in the sidebar.
+and runs `scripts/run.sh` there in the foreground, where it keeps its connection. It fires
+in every cmux terminal (including the ones cmux restores on launch), starts the server
+once, and never starts a second copy. You'll see a `⚡ cmux-remote` workspace in the sidebar.
 
 The Mac must be awake and on power for the phone to reach it. Closing the lid sleeps it
 (unless an external display keeps it in clamshell); on battery, `caffeinate -s` holds it.
+
+### Auto-update
+
+`run.sh` is a supervisor loop: it keeps the server alive (restarts within a few seconds if
+it ever crashes) and every `CMUX_REMOTE_UPDATE_INTERVAL` seconds (default 300) checks the
+git remote. When `origin` is ahead **and the working tree is clean**, it fast-forwards,
+rebuilds the binary, and restarts into the new version. So on any machine you set up with
+`install-autostart.sh`, a `git push` from elsewhere rolls out on its own — no manual pull.
+
+The clean-tree guard means it never touches a machine you're actively developing on (one
+with uncommitted changes just keeps running what it has). Turn the behavior off with
+`CMUX_REMOTE_AUTOUPDATE=0`. Pulls use that machine's own git credentials, so a private repo
+just needs git to be authenticated there (as it already is after you cloned).
 
 ## Navigation keys
 
