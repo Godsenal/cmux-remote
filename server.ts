@@ -314,6 +314,15 @@ async function pollScreens() {
           lines: SCROLLBACK_LINES,
         }))?.text ?? "";
       } catch {
+        // A surface cmux hasn't rendered yet (a brand-new one while the desktop is hidden)
+        // reads as "not found". Show a hint once instead of a blank, and keep polling —
+        // it resolves itself the moment cmux renders the surface. Only for targets we've
+        // never read; an established surface's momentary error must not wipe its screen.
+        if (!lastScreen.has(key)) {
+          const hint = "⏳ 터미널을 준비 중입니다…\n맥에서 이 워크스페이스가 화면에 한 번 보이면 나타납니다.";
+          lastScreen.set(key, hint);
+          for (const c of clients) if (targetKey(c.data) === key) send(c, "screen", { target: key, full: hint });
+        }
         return;
       }
 
@@ -628,6 +637,10 @@ const server = Bun.serve<ClientData>({
           const res = await onWorkspace("surface.create", ws.data.workspace, cwd ? { cwd } : {});
           const surface = res?.surface_id;
           if (surface) {
+            // A brand-new surface has no rendered terminal, so surface.read_text returns
+            // "not found" and the phone shows a blank. Focusing it makes cmux render it,
+            // which instantiates the terminal so it can be read.
+            await cmux.call("surface.focus", { surface_id: surface }).catch(() => {});
             send(ws, "created", { kind: "surface", workspace: ws.data.workspace, surface });
             await Promise.all([pollSurfaces(), pollScreens()]); // reflect it without waiting a poll
           }
@@ -644,6 +657,9 @@ const server = Bun.serve<ClientData>({
             const res = await cmux.call("surface.split", { surface_id: surfaceId, direction: "right" });
             const surface = res?.surface_id;
             if (surface) {
+              // Focus it so cmux renders the new pane — otherwise its terminal is never
+              // instantiated and read_text returns "not found" (a blank on the phone).
+              await cmux.call("surface.focus", { surface_id: surface }).catch(() => {});
               send(ws, "created", { kind: "split", workspace: ws.data.workspace, surface });
               await Promise.all([pollSurfaces(), pollScreens()]);
             }
@@ -651,11 +667,16 @@ const server = Bun.serve<ClientData>({
         } else if (msg.type === "new-workspace") {
           // A fresh workspace, opened in the currently-viewed workspace's directory when there
           // is one (so "new workspace" means "another agent on this repo"), else cmux's default.
-          // workspace.create leaves it unselected, so the Mac's focus doesn't move.
           const cwd = workspaceCache.find((w) => w.id === ws.data.workspace)?.current_directory;
           const res = await cmux.call("workspace.create", cwd ? { cwd } : {});
           const workspace = res?.workspace_id;
           if (workspace) {
+            // A new workspace's terminal isn't instantiated until cmux renders it once, so
+            // selecting it forces the render (then read_text works); restore the Mac's prior
+            // focus right after so creating from the phone doesn't yank the desktop away.
+            const prev = workspaceCache.find((w) => w.selected)?.id;
+            await onWorkspace("workspace.select", workspace).catch(() => {});
+            if (prev && prev !== workspace) await onWorkspace("workspace.select", prev).catch(() => {});
             send(ws, "created", { kind: "workspace", workspace });
             await pollWorkspaces(); // broadcast the new list so every client sees it
           }
