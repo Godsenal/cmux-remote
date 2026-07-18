@@ -114,6 +114,16 @@
   #scrim.open { opacity: 1; pointer-events: auto; }
   /* New-workspace button — a fresh sidebar workspace in the current repo's directory. */
   #newws { margin: 6px 8px 0; padding: 10px; font-size: 13px; color: var(--accent); border-color: var(--accent); }
+  /* Window switcher — only shown when cmux has more than one window open. */
+  #winbar {
+    display: flex; gap: 5px; padding: 8px 10px 0; flex: none;
+    overflow-x: auto;
+  }
+  #winbar button {
+    flex: none; padding: 5px 10px; font-size: 12px; white-space: nowrap;
+    background: #1e242c; border: 1px solid var(--line); border-radius: 7px; color: var(--dim);
+  }
+  #winbar button.sel { border-color: var(--accent); color: var(--accent); }
   #wslist { flex: 1; overflow: auto; padding: 6px; }
   .ws {
     padding: 8px 6px 8px 12px; border-radius: 8px; cursor: pointer;
@@ -209,6 +219,7 @@
     <button id="fdec" aria-label="글자 작게">A−</button>
     <button id="finc" aria-label="글자 크게">A+</button>
   </div>
+  <div id="winbar" hidden></div>
   <button id="newws">＋ 새 워크스페이스</button>
   <div id="wslist"></div>
   <div id="pushbar">
@@ -233,6 +244,7 @@ const fitBtn = $("#fit");
 let ws = null, current = null, currentSurface = null, workspaces = [], surfaces = [], toastTimer = null;
 let notifySet = new Set(); // workspace ids with push turned on (server-authoritative)
 let unreadSet = new Set(); // workspace ids with unseen activity (server-authoritative)
+let windowsList = [], currentWindowId = null; // cmux windows + the one this client views
 let screenText = ""; // full text of the viewed target, kept in sync via deltas
 const surfacesEl = $("#surfaces");
 
@@ -398,6 +410,10 @@ function handle(m) {
   } else if (m.type === "unread") {
     unreadSet = new Set(m.workspaces || []);
     renderList();
+  } else if (m.type === "windows") {
+    windowsList = m.windows || [];
+    currentWindowId = m.current || null;
+    renderWindows();
   } else if (m.type === "notifications") {
     for (const n of m.items) notify(n);
   } else if (m.type === "error") {
@@ -475,6 +491,34 @@ function renderSurfaces() {
     b.onclick = () => subscribeSurface(s.id);
     surfacesEl.append(b);
   });
+}
+
+function renderWindows() {
+  const bar = $("#winbar");
+  // Only worth showing when cmux actually has more than one window open.
+  if (windowsList.length < 2) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    return;
+  }
+  bar.hidden = false;
+  bar.innerHTML = "";
+  windowsList.forEach((w) => {
+    const b = document.createElement("button");
+    b.className = w.id === currentWindowId ? "sel" : "";
+    b.textContent = `창 ${w.index + 1}` + (w.workspaces ? ` · ${w.workspaces}` : "");
+    b.onclick = () => selectWindow(w.id);
+    bar.append(b);
+  });
+}
+
+// Switch which window's workspaces this phone shows. The server re-scopes our list; the
+// workspaces handler then auto-jumps to that window's selected workspace.
+function selectWindow(id) {
+  if (id === currentWindowId || ws?.readyState !== 1) return;
+  currentWindowId = id;
+  renderWindows();
+  ws.send(JSON.stringify({ type: "select-window", window: id }));
 }
 
 function renderList() {

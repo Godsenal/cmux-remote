@@ -257,7 +257,7 @@ async function pushToPhones(payload: Record<string, unknown>) {
 
 // --- clients ---------------------------------------------------------------
 
-type ClientData = { workspace: string | null; surface: string | null };
+type ClientData = { workspace: string | null; surface: string | null; window: string | null };
 const clients = new Set<any>();
 
 /** What a client is currently viewing: a specific surface, or a workspace's focus. */
@@ -374,13 +374,49 @@ async function pollSurfaces() {
 }
 
 let workspaceCache: any[] = [];
+// cmux can have several windows open at once, each with its own workspaces. Clients
+// default to the current window and can switch; workspaceCache is the union across all
+// windows, since unread/notifications/cwd lookups don't care which window owns a workspace.
+let windowsCache: any[] = [];
+let currentWindowId: string | null = null;
 
 async function pollWorkspaces() {
+  let wins: any[];
   try {
-    workspaceCache = (await cmux.call("workspace.list"))?.workspaces ?? [];
-    broadcast("workspaces", { workspaces: workspaceCache });
+    wins = (await cmux.call("window.list"))?.windows ?? [];
   } catch {
-    /* cmux restarting; next tick retries */
+    return; // cmux restarting; next tick retries
+  }
+  windowsCache = wins;
+  try {
+    currentWindowId = (await cmux.call("window.current"))?.window_id ?? wins[0]?.id ?? null;
+  } catch {
+    currentWindowId = wins[0]?.id ?? null;
+  }
+
+  // One workspace.list per window; each client is shown the window it's scoped to.
+  const byWindow = new Map<string, any[]>();
+  await Promise.all(
+    wins.map(async (w: any) => {
+      try {
+        byWindow.set(w.id, (await cmux.call("workspace.list", { window_id: w.id }))?.workspaces ?? []);
+      } catch {
+        /* skip this window this tick */
+      }
+    }),
+  );
+  workspaceCache = [...byWindow.values()].flat();
+
+  const windows = wins.map((w: any) => ({
+    id: w.id,
+    index: w.index,
+    workspaces: w.workspace_count,
+  }));
+  for (const c of clients) {
+    let winId = c.data.window || currentWindowId;
+    if (winId && !byWindow.has(winId)) winId = currentWindowId; // a picked window that closed
+    send(c, "windows", { windows, current: winId });
+    send(c, "workspaces", { workspaces: (winId && byWindow.get(winId)) || [] });
   }
 }
 
@@ -526,7 +562,7 @@ const server = Bun.serve<ClientData>({
 
     if (url.pathname === "/ws") {
       if (!authorized(req, url)) return new Response("unauthorized", { status: 401 });
-      if (server.upgrade(req, { data: { workspace: null, surface: null } })) return;
+      if (server.upgrade(req, { data: { workspace: null, surface: null, window: null } })) return;
       return new Response("upgrade failed", { status: 400 });
     }
 
@@ -635,6 +671,11 @@ const server = Bun.serve<ClientData>({
         } else if (msg.type === "key" && ws.data.workspace) {
           const bytes = KEYS[msg.key];
           if (bytes) await onTarget("surface.send_text", ws.data, { text: bytes });
+        } else if (msg.type === "select-window" && msg.window) {
+          // Scope this client to another cmux window; its workspace list re-scopes on the
+          // next poll (triggered now). Read-only — it never moves the desktop's focus.
+          ws.data.window = msg.window;
+          await pollWorkspaces();
         } else if (msg.type === "select" && msg.workspace) {
           await onWorkspace("workspace.select", msg.workspace);
         } else if (msg.type === "new-surface" && ws.data.workspace) {
@@ -681,7 +722,7 @@ const server = Bun.serve<ClientData>({
             // A new workspace's terminal isn't instantiated until cmux renders it once, so
             // selecting it forces the render (then read_text works); restore the Mac's prior
             // focus right after so creating from the phone doesn't yank the desktop away.
-            const prev = workspaceCache.find((w) => w.selected)?.id;
+            const prev = windowsCache.find((w) => w.id === currentWindowId)?.selected_workspace_id;
             await onWorkspace("workspace.select", workspace).catch(() => {});
             if (prev && prev !== workspace) await onWorkspace("workspace.select", prev).catch(() => {});
             send(ws, "created", { kind: "workspace", workspace });
