@@ -485,6 +485,14 @@ const server = Bun.serve<ClientData>({
       return Response.json({ ok: true, count: config.subscriptions.length });
     }
 
+    if (url.pathname === "/push/unsubscribe" && req.method === "POST") {
+      const { endpoint } = (await req.json()) as { endpoint: string };
+      const before = config.subscriptions.length;
+      config.subscriptions = config.subscriptions.filter((s) => s.endpoint !== endpoint);
+      if (config.subscriptions.length !== before) await saveConfig(config);
+      return Response.json({ ok: true, count: config.subscriptions.length });
+    }
+
     if (url.pathname === "/push/test" && req.method === "POST") {
       await pushToPhones({ title: "cmux remote", body: "푸시 알림이 정상 동작합니다.", tag: "test" });
       return Response.json({ ok: true, sent: config.subscriptions.length });
