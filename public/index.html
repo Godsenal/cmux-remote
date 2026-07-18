@@ -19,6 +19,7 @@
     --fg: #d7dee7;
     --dim: #7d8899;
     --accent: #7aa2f7;
+    --unread: #9ece6a;
     --danger: #f7768e;
     --safe-b: env(safe-area-inset-bottom, 0px);
   }
@@ -86,11 +87,13 @@
   #bar {
     display: flex; gap: 6px; padding: 6px 8px calc(6px + var(--safe-b));
     background: var(--panel); border-top: 1px solid var(--line); flex: none;
+    align-items: flex-end;
   }
   #input {
     flex: 1; min-width: 0; background: #0a0c0f; color: var(--fg);
     border: 1px solid var(--line); border-radius: 7px; padding: 10px;
     font-family: ui-monospace, Menlo, monospace; font-size: 16px; /* 16px stops iOS zoom */
+    resize: none; line-height: 1.4; max-height: 40vh; overflow-y: auto;
   }
   #input:focus { outline: none; border-color: var(--accent); }
 
@@ -124,6 +127,11 @@
   }
   .bell:active { background: #222933; }
   .bell.on { opacity: 1; filter: none; }
+  /* Unread activity: a small dot on workspaces that changed while unwatched. */
+  .ws .unread {
+    flex: none; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--unread); box-shadow: 0 0 6px var(--unread);
+  }
   .ws .n { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ws .d { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ws .badge { color: var(--accent); font-size: 11px; }
@@ -186,7 +194,7 @@
 </div>
 
 <div id="bar">
-  <input id="input" placeholder="입력 후 Enter" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" />
+  <textarea id="input" rows="1" placeholder="입력 후 전송" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
   <button id="send">전송</button>
 </div>
 
@@ -221,6 +229,7 @@ const fitBtn = $("#fit");
 
 let ws = null, current = null, currentSurface = null, workspaces = [], surfaces = [], toastTimer = null;
 let notifySet = new Set(); // workspace ids with push turned on (server-authoritative)
+let unreadSet = new Set(); // workspace ids with unseen activity (server-authoritative)
 let screenText = ""; // full text of the viewed target, kept in sync via deltas
 const surfacesEl = $("#surfaces");
 
@@ -380,6 +389,9 @@ function handle(m) {
   } else if (m.type === "notify-state") {
     notifySet = new Set(m.workspaces || []);
     renderList();
+  } else if (m.type === "unread") {
+    unreadSet = new Set(m.workspaces || []);
+    renderList();
   } else if (m.type === "notifications") {
     for (const n of m.items) notify(n);
   } else if (m.type === "error") {
@@ -409,6 +421,7 @@ function notify(n) {
 
 function subscribe(id) {
   current = id;
+  unreadSet.delete(id); // opening it clears the badge at once; the server agrees on its next tick
   currentSurface = null; // new workspace → follow its focused surface until told otherwise
   surfaces = [];
   renderSurfaces();
@@ -476,7 +489,16 @@ function renderList() {
       if (ws?.readyState === 1) ws.send(JSON.stringify({ type: "notify-toggle", workspace: w.id, on: !on }));
     };
 
-    el.append(main, bell);
+    // Unread activity dot — server marks a workspace unread when its screen moves
+    // while unwatched; never for the one we're viewing.
+    if (unreadSet.has(w.id) && w.id !== current) {
+      const dot = document.createElement("span");
+      dot.className = "unread";
+      dot.setAttribute("aria-label", "읽지 않은 활동");
+      el.append(main, dot, bell);
+    } else {
+      el.append(main, bell);
+    }
     listEl.append(el);
   }
 }
@@ -486,21 +508,25 @@ const esc = (s) =>
 
 const sendKey = (k) => ws?.readyState === 1 && ws.send(JSON.stringify({ type: "key", key: k }));
 
+function autoGrow() {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px";
+}
+
 function sendText() {
   const text = input.value;
   if (!text || ws?.readyState !== 1) return;
   ws.send(JSON.stringify({ type: "send", text }));
   ws.send(JSON.stringify({ type: "key", key: "enter" }));
   input.value = "";
+  autoGrow();
 }
 
 for (const b of document.querySelectorAll("#keys button")) {
   b.onclick = () => sendKey(b.dataset.k);
 }
 $("#send").onclick = sendText;
-input.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); sendText(); }
-});
+input.addEventListener("input", autoGrow);
 
 // Create a new terminal ("tab") in the current workspace, or a whole new workspace.
 // The server replies with a `created` message carrying the new id to jump to.

@@ -372,6 +372,71 @@ async function pollWorkspaces() {
   }
 }
 
+/**
+ * Unread activity. cmux exposes no per-workspace "activity" flag, so it's derived
+ * here: poll every workspace's screen and flag the ones whose content changed while
+ * nobody was viewing them. Reading just the viewport (no scrollback) keeps this to a
+ * few ms even for dozens of workspaces. State is global, not per-device — a personal
+ * remote has one user, and that is far simpler than tracking a read cursor per phone.
+ */
+const activitySig = new Map<string, string>(); // workspace id -> signature of its screen
+const unread = new Set<string>(); // workspace ids changed while unwatched
+
+// Compact content signature — length plus a rolling hash. We only need to notice
+// that the screen differs, not to store every workspace's full buffer.
+function screenSig(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return `${s.length}:${h}`;
+}
+
+const broadcastUnread = () => broadcast("unread", { workspaces: [...unread] });
+
+async function pollActivity() {
+  if (!clients.size || !workspaceCache.length) return;
+
+  const viewed = new Set<string>();
+  for (const ws of clients) if (ws.data.workspace) viewed.add(ws.data.workspace);
+
+  let changed = false;
+  await Promise.all(
+    workspaceCache.map(async (w: any) => {
+      let text: string;
+      try {
+        text = (await onWorkspace("surface.read_text", w.id))?.text ?? "";
+      } catch {
+        return;
+      }
+      const next = screenSig(text);
+      const prev = activitySig.get(w.id);
+      activitySig.set(w.id, next);
+
+      if (viewed.has(w.id)) {
+        // On screen right now: keep its baseline current so leaving it doesn't
+        // re-flag, and it is never unread while being watched.
+        if (unread.delete(w.id)) changed = true;
+      } else if (prev !== undefined && prev !== next && !unread.has(w.id)) {
+        // A first sighting (prev === undefined) only primes the baseline — otherwise
+        // every workspace would light up unread the instant the server starts.
+        unread.add(w.id);
+        changed = true;
+      }
+    }),
+  );
+
+  // Forget workspaces that have since closed.
+  const live = new Set(workspaceCache.map((w: any) => w.id));
+  for (const id of [...unread]) {
+    if (!live.has(id)) {
+      unread.delete(id);
+      changed = true;
+    }
+  }
+  for (const id of [...activitySig.keys()]) if (!live.has(id)) activitySig.delete(id);
+
+  if (changed) broadcastUnread();
+}
+
 const seenNotifications = new Set<string>();
 let notificationsPrimed = false;
 
@@ -426,6 +491,7 @@ function loop(fn: () => Promise<void>, ms: number) {
 loop(pollScreens, SCREEN_POLL_MS);
 loop(pollSurfaces, META_POLL_MS);
 loop(pollWorkspaces, META_POLL_MS);
+loop(pollActivity, META_POLL_MS);
 loop(pollNotifications, META_POLL_MS);
 
 // --- http / ws -------------------------------------------------------------
@@ -522,6 +588,7 @@ const server = Bun.serve<ClientData>({
     open(ws) {
       clients.add(ws);
       send(ws, "notify-state", { workspaces: config.notifyWorkspaces });
+      send(ws, "unread", { workspaces: [...unread] });
       pollWorkspaces();
     },
     close(ws) {
@@ -541,6 +608,7 @@ const server = Bun.serve<ClientData>({
           // surface (a pane/tab) narrows to just that one.
           ws.data.workspace = msg.workspace;
           ws.data.surface = msg.surface ?? null;
+          if (unread.delete(msg.workspace)) broadcastUnread(); // opening it marks it read
           lastScreen.delete(targetKey(ws.data)); // force a repaint for the new view
           await Promise.all([pollScreens(), pollSurfaces()]);
         } else if (msg.type === "send" && ws.data.workspace) {
