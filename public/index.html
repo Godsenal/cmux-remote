@@ -56,9 +56,12 @@
     flex: 1; margin: 0; padding: 8px 10px;
     overflow: auto; -webkit-overflow-scrolling: touch;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 9px; line-height: 1.25;
+    font-size: 13px; line-height: 1.3;
     white-space: pre; tab-size: 8;
   }
+  /* Wrap mode: long terminal lines fold to the phone's width at a readable size,
+     instead of the whole grid shrinking to fit. Only vertical scrolling. */
+  #screen.wrap { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 
   #keys {
     display: flex; gap: 5px; padding: 6px 8px; flex: none;
@@ -163,7 +166,7 @@
 <aside id="sidebar">
   <div class="shead">
     <b>워크스페이스</b>
-    <button id="fit" aria-label="너비 맞춤">맞춤</button>
+    <button id="fit" aria-label="줄바꿈 켜기/끄기">줄바꿈</button>
     <button id="fdec" aria-label="글자 작게">A−</button>
     <button id="finc" aria-label="글자 크게">A+</button>
   </div>
@@ -194,48 +197,27 @@ const urlToken = new URLSearchParams(location.search).get("t");
 if (urlToken) localStorage.setItem("token", urlToken);
 const token = urlToken || localStorage.getItem("token") || "";
 
-let fontSize = Number(localStorage.getItem("fs") || 9);
-let autoFit = localStorage.getItem("fit") !== "0";
+let fontSize = Number(localStorage.getItem("fs") || 13);
+let wrap = localStorage.getItem("wrap") !== "0"; // wrap by default — readable beats whole-line
 
-// Ratio of glyph width to font-size for the monospace stack, measured once.
-const charRatio = (() => {
-  const probe = document.createElement("span");
-  probe.style.cssText =
-    "position:absolute;visibility:hidden;white-space:pre;font-size:100px;" +
-    "font-family:ui-monospace,'SF Mono',Menlo,monospace";
-  probe.textContent = "M".repeat(100);
-  document.body.append(probe);
-  const r = probe.getBoundingClientRect().width / 100 / 100;
-  probe.remove();
-  return r;
-})();
-
-/** Terminals are ~100-160 columns; on a phone the only way to see a whole line is to size to fit. */
 function applyFont() {
-  if (autoFit) {
-    const cols = Math.max(20, ...screenEl.textContent.split("\n").map((l) => l.length));
-    const avail = screenEl.clientWidth - 20; // padding
-    fontSize = Math.max(4, Math.min(18, avail / (cols * charRatio)));
-  }
-  screenEl.style.fontSize = fontSize.toFixed(2) + "px";
-  fitBtn.textContent = autoFit ? "맞춤 ✓" : "맞춤";
+  screenEl.style.fontSize = fontSize.toFixed(1) + "px";
+  screenEl.classList.toggle("wrap", wrap);
+  fitBtn.textContent = wrap ? "줄바꿈 ✓" : "줄바꿈";
 }
 
 const nudge = (d) => {
-  autoFit = false;
-  localStorage.setItem("fit", "0");
-  fontSize = Math.max(4, Math.min(24, fontSize + d));
+  fontSize = Math.max(7, Math.min(28, fontSize + d));
   localStorage.setItem("fs", fontSize);
   applyFont();
 };
 $("#finc").onclick = () => nudge(1);
 $("#fdec").onclick = () => nudge(-1);
 fitBtn.onclick = () => {
-  autoFit = !autoFit;
-  localStorage.setItem("fit", autoFit ? "1" : "0");
+  wrap = !wrap;
+  localStorage.setItem("wrap", wrap ? "1" : "0");
   applyFont();
 };
-addEventListener("resize", applyFont);
 applyFont();
 
 function showToast(text) {
@@ -297,7 +279,6 @@ function paint(text) {
   const atBottom = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
   const left = screenEl.scrollLeft;
   screenEl.textContent = text;
-  applyFont(); // width depends on the new content
   screenEl.scrollLeft = left;
   if (atBottom) screenEl.scrollTop = screenEl.scrollHeight;
 }
