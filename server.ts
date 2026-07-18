@@ -728,6 +728,21 @@ const server = Bun.serve<ClientData>({
             send(ws, "created", { kind: "workspace", workspace });
             await pollWorkspaces(); // broadcast the new list so every client sees it
           }
+        } else if (msg.type === "close-surface" && msg.surface) {
+          // Close one tab/pane. cmux moves focus to a sibling; the client's surfaces
+          // handler falls back to the workspace focus when the viewed one disappears.
+          await cmux.call("surface.close", { surface_id: msg.surface });
+          await Promise.all([pollSurfaces(), pollScreens()]);
+        } else if (msg.type === "close-workspace" && msg.workspace) {
+          // Close a whole workspace. The client's workspaces handler auto-jumps to another
+          // when the current one vanishes.
+          await onWorkspace("workspace.close", msg.workspace);
+          await pollWorkspaces();
+        } else if (msg.type === "close-window" && msg.window) {
+          // Close a cmux window. pollWorkspaces re-scopes any client that was on it back
+          // to the current window.
+          await cmux.call("window.close", { window_id: msg.window });
+          await pollWorkspaces();
         } else if (msg.type === "notify-toggle" && msg.workspace) {
           // Turn push on/off for one workspace. Global (not per-device) — it decides
           // which sessions are allowed to ping at all; the master push button decides

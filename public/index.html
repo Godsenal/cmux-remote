@@ -71,13 +71,24 @@
     display: flex; gap: 5px; padding: 6px 8px; flex: none;
     overflow-x: auto; background: var(--panel); border-bottom: 1px solid var(--line);
   }
-  #surfaces button {
-    flex: none; padding: 6px 10px; font-size: 12px; max-width: 44vw;
+  /* Each tab is a switch button plus a small ✕ to close it, sharing one border. */
+  #surfaces .surf {
+    flex: none; display: inline-flex; align-items: stretch; max-width: 52vw;
+    border: 1px solid var(--line); border-radius: 7px; overflow: hidden;
+  }
+  #surfaces .surf.sel { border-color: var(--accent); }
+  /* A split (surface in another pane) reads distinct from a tab of the current pane. */
+  #surfaces .surf.split { border-style: dashed; }
+  #surfaces .surf-label {
+    border: none; background: transparent; color: var(--fg);
+    padding: 6px 4px 6px 10px; font-size: 12px; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  #surfaces button.sel { border-color: var(--accent); color: var(--accent); }
-  /* A split (surface in another pane) reads distinct from a tab of the current pane. */
-  #surfaces button.split { border-style: dashed; }
+  #surfaces .surf.sel .surf-label { color: var(--accent); }
+  #surfaces .surf-x {
+    border: none; background: transparent; color: var(--dim);
+    padding: 6px 8px; font-size: 11px; flex: none;
+  }
 
   #keys {
     display: flex; gap: 5px; padding: 6px 8px; flex: none;
@@ -119,11 +130,20 @@
     display: flex; gap: 5px; padding: 8px 10px 0; flex: none;
     overflow-x: auto;
   }
-  #winbar button {
-    flex: none; padding: 5px 10px; font-size: 12px; white-space: nowrap;
-    background: #1e242c; border: 1px solid var(--line); border-radius: 7px; color: var(--dim);
+  #winbar .win {
+    flex: none; display: inline-flex; align-items: stretch; white-space: nowrap;
+    background: #1e242c; border: 1px solid var(--line); border-radius: 7px; overflow: hidden;
   }
-  #winbar button.sel { border-color: var(--accent); color: var(--accent); }
+  #winbar .win.sel { border-color: var(--accent); }
+  #winbar .win-label {
+    border: none; background: transparent; color: var(--dim);
+    padding: 5px 4px 5px 10px; font-size: 12px;
+  }
+  #winbar .win.sel .win-label { color: var(--accent); }
+  #winbar .win-x {
+    border: none; background: transparent; color: var(--dim);
+    padding: 5px 8px; font-size: 11px; flex: none;
+  }
   #wslist { flex: 1; overflow: auto; padding: 6px; }
   .ws {
     padding: 8px 6px 8px 12px; border-radius: 8px; cursor: pointer;
@@ -139,6 +159,12 @@
   }
   .bell:active { background: #222933; }
   .bell.on { opacity: 1; filter: none; }
+  /* Close a workspace — dim ✕ so it never competes with the row's tap-to-open. */
+  .ws .close {
+    flex: none; background: none; border: none; padding: 6px 8px;
+    font-size: 14px; line-height: 1; color: var(--dim);
+  }
+  .ws .close:active { background: #3a2530; color: var(--danger); }
   /* Unread activity: a small dot on workspaces that changed while unwatched. */
   .ws .unread {
     flex: none; width: 8px; height: 8px; border-radius: 50%;
@@ -481,16 +507,32 @@ function renderSurfaces() {
   const curPane = cur?.pane;
   const multiPane = new Set(surfaces.map((s) => s.pane)).size > 1;
   surfaces.forEach((s, i) => {
-    const b = document.createElement("button");
     const active = currentSurface ? s.id === currentSurface : s.focused;
-    b.className = active ? "sel" : "";
     const label = (s.title || `${s.type} ${i + 1}`).replace(/^.*[@:]/, "").slice(0, 22) || `#${i + 1}`;
     const isSplit = multiPane && s.pane !== curPane;
+
+    const wrap = document.createElement("span");
+    wrap.className = "surf" + (active ? " sel" : "") + (isSplit ? " split" : "");
+    const b = document.createElement("button");
+    b.className = "surf-label";
     b.textContent = (isSplit ? "⧉ " : "") + label;
-    if (isSplit) b.classList.add("split");
     b.onclick = () => subscribeSurface(s.id);
-    surfacesEl.append(b);
+    const x = document.createElement("button");
+    x.className = "surf-x";
+    x.textContent = "✕";
+    x.setAttribute("aria-label", "탭 닫기");
+    x.onclick = () => askClose(`이 탭을 닫을까요?\n${label}`, { type: "close-surface", surface: s.id });
+    wrap.append(b, x);
+    surfacesEl.append(wrap);
   });
+}
+
+// Confirm a destructive close, then tell the server. Guarded because closing a tab,
+// workspace, or window ends whatever is running in it.
+function askClose(message, msg) {
+  if (ws?.readyState !== 1) return;
+  if (!confirm(message)) return;
+  ws.send(JSON.stringify(msg));
 }
 
 function renderWindows() {
@@ -504,11 +546,23 @@ function renderWindows() {
   bar.hidden = false;
   bar.innerHTML = "";
   windowsList.forEach((w) => {
+    const wrap = document.createElement("span");
+    wrap.className = "win" + (w.id === currentWindowId ? " sel" : "");
     const b = document.createElement("button");
-    b.className = w.id === currentWindowId ? "sel" : "";
+    b.className = "win-label";
     b.textContent = `창 ${w.index + 1}` + (w.workspaces ? ` · ${w.workspaces}` : "");
     b.onclick = () => selectWindow(w.id);
-    bar.append(b);
+    const x = document.createElement("button");
+    x.className = "win-x";
+    x.textContent = "✕";
+    x.setAttribute("aria-label", "창 닫기");
+    x.onclick = () =>
+      askClose(`창 ${w.index + 1}을(를) 닫을까요?\n이 창의 워크스페이스 ${w.workspaces}개가 모두 종료됩니다.`, {
+        type: "close-window",
+        window: w.id,
+      });
+    wrap.append(b, x);
+    bar.append(wrap);
   });
 }
 
@@ -546,16 +600,28 @@ function renderList() {
       if (ws?.readyState === 1) ws.send(JSON.stringify({ type: "notify-toggle", workspace: w.id, on: !on }));
     };
 
+    const close = document.createElement("button");
+    close.className = "close";
+    close.textContent = "✕";
+    close.setAttribute("aria-label", "워크스페이스 닫기");
+    close.onclick = (e) => {
+      e.stopPropagation();
+      askClose(`'${w.title}' 워크스페이스를 닫을까요?\n실행 중인 작업이 종료됩니다.`, {
+        type: "close-workspace",
+        workspace: w.id,
+      });
+    };
+
     // Unread activity dot — server marks a workspace unread when its screen moves
     // while unwatched; never for the one we're viewing.
+    const tail = [];
     if (unreadSet.has(w.id) && w.id !== current) {
       const dot = document.createElement("span");
       dot.className = "unread";
       dot.setAttribute("aria-label", "읽지 않은 활동");
-      el.append(main, dot, bell);
-    } else {
-      el.append(main, bell);
+      tail.push(dot);
     }
+    el.append(main, ...tail, bell, close);
     listEl.append(el);
   }
 }
