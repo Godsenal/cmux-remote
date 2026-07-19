@@ -196,6 +196,83 @@ async function onTarget(
 }
 
 /**
+ * Runs an operation with cmux told to treat itself as the frontmost app.
+ *
+ * cmux instantiates a surface's terminal only while it considers itself active, so
+ * anything the phone creates while a dialog — or any other app — holds the Mac's focus
+ * gets created but never rendered: surface.read_text then answers "not found" and the
+ * phone sits on a blank until someone walks over to the Mac, which defeats the point of
+ * driving this remotely. app.focus_override lifts that for the duration of the call
+ * without touching the desktop's real focus, selection, or window order.
+ *
+ * Refcounted: concurrent clients each take a hold and only the last one clears it, so one
+ * phone finishing its action can't drop the override out from under another's.
+ */
+let activeHolds = 0;
+
+async function asActive<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeHolds++ === 0) {
+    await cmux.call("app.focus_override.set", { state: "active" }).catch(() => {});
+  }
+  try {
+    return await fn();
+  } finally {
+    if (--activeHolds === 0) {
+      await cmux.call("app.focus_override.set", { state: "clear" }).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Waits until a surface can actually be read, which is the only signal that matters: cmux
+ * reports a surface the instant it exists but instantiates its terminal only once it
+ * renders it, and read_text answers "not found" until then.
+ *
+ * surface.health's `in_window` deliberately isn't used as the predicate — it tracks
+ * whether the workspace is the selected one, and an unselected surface reads fine.
+ */
+async function waitReadable(surface: string, tries = 20): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    const res = await cmux.call("surface.read_text", { surface_id: surface }).catch(() => null);
+    if (res) return true;
+    await Bun.sleep(100);
+  }
+  return false;
+}
+
+/**
+ * cmux's own view of whether a surface made it onto the screen. Only meaningful once a
+ * surface has failed to become readable, where it separates "on screen but still warming
+ * up" from "cmux never drew it" — the latter being what a dialog holding the Mac causes.
+ */
+async function isOnScreen(surface: string): Promise<boolean> {
+  const health = await cmux.call("surface.health", { surface_id: surface }).catch(() => null);
+  const hit = health?.surfaces?.find((s: any) => s.id === surface || s.ref === surface);
+  return !!hit?.in_window;
+}
+
+/**
+ * Renders a freshly created surface and tells the phone how it went.
+ *
+ * Focusing is what makes cmux instantiate the terminal; the wait afterwards is what turns
+ * "the phone shows an unexplained blank" into a message it can act on. Callers run this
+ * inside asActive(), which is what lets the focus land while the Mac is busy elsewhere.
+ */
+async function announceCreated(ws: any, kind: string, workspace: string, surface: string) {
+  await cmux.call("surface.focus", { surface_id: surface });
+  send(ws, "created", { kind, workspace, surface });
+
+  if (!(await waitReadable(surface))) {
+    send(ws, "error", {
+      message: (await isOnScreen(surface))
+        ? "터미널을 준비 중입니다 — 잠시 후 다시 시도해 주세요."
+        : "cmux가 이 터미널을 그리지 못했습니다. 맥에 열린 대화상자가 있는지 확인해 주세요.",
+    });
+  }
+  await Promise.all([pollSurfaces(), pollScreens()]); // reflect it without waiting a poll
+}
+
+/**
  * Navigation uses emacs/readline control bytes, not arrow escape sequences.
  *
  * cmux's send_text splits the ESC byte of an escape sequence from the rest when the
@@ -319,7 +396,7 @@ async function pollScreens() {
         // it resolves itself the moment cmux renders the surface. Only for targets we've
         // never read; an established surface's momentary error must not wipe its screen.
         if (!lastScreen.has(key)) {
-          const hint = "⏳ 터미널을 준비 중입니다…\n맥에서 이 워크스페이스가 화면에 한 번 보이면 나타납니다.";
+          const hint = "⏳ 터미널을 준비 중입니다…\ncmux가 이 화면을 그리는 즉시 나타납니다.";
           lastScreen.set(key, hint);
           for (const c of clients) if (targetKey(c.data) === key) send(c, "screen", { target: key, full: hint });
         }
@@ -681,53 +758,60 @@ const server = Bun.serve<ClientData>({
         } else if (msg.type === "new-surface" && ws.data.workspace) {
           // A new terminal ("tab") in the focused pane of the workspace being viewed.
           // Inherit that workspace's directory so the new shell starts in the same repo.
-          const cwd = workspaceCache.find((w) => w.id === ws.data.workspace)?.current_directory;
-          const res = await onWorkspace("surface.create", ws.data.workspace, cwd ? { cwd } : {});
-          const surface = res?.surface_id;
-          if (surface) {
-            // A brand-new surface has no rendered terminal, so surface.read_text returns
-            // "not found" and the phone shows a blank. Focusing it makes cmux render it,
-            // which instantiates the terminal so it can be read.
-            await cmux.call("surface.focus", { surface_id: surface }).catch(() => {});
-            send(ws, "created", { kind: "surface", workspace: ws.data.workspace, surface });
-            await Promise.all([pollSurfaces(), pollScreens()]); // reflect it without waiting a poll
-          }
+          const workspace = ws.data.workspace;
+          const cwd = workspaceCache.find((w) => w.id === workspace)?.current_directory;
+          await asActive(async () => {
+            const res = await onWorkspace("surface.create", workspace, cwd ? { cwd } : {});
+            const surface = res?.surface_id;
+            if (surface) await announceCreated(ws, "surface", workspace, surface);
+          });
         } else if (msg.type === "new-split" && ws.data.workspace) {
           // Split the viewed surface (or the workspace's focused one) into a new pane —
           // unlike new-surface (a tab in the same pane), a split shows up side-by-side on
           // the Mac. surface.split needs an explicit surface_id, so resolve it first.
+          const workspace = ws.data.workspace;
           let surfaceId = ws.data.surface;
           if (!surfaceId) {
-            const list = (await onWorkspace("surface.list", ws.data.workspace))?.surfaces ?? [];
+            const list = (await onWorkspace("surface.list", workspace))?.surfaces ?? [];
             surfaceId = (list.find((s: any) => s.focused) ?? list[0])?.id ?? null;
           }
           if (surfaceId) {
-            const res = await cmux.call("surface.split", { surface_id: surfaceId, direction: "right" });
-            const surface = res?.surface_id;
-            if (surface) {
-              // Focus it so cmux renders the new pane — otherwise its terminal is never
-              // instantiated and read_text returns "not found" (a blank on the phone).
-              await cmux.call("surface.focus", { surface_id: surface }).catch(() => {});
-              send(ws, "created", { kind: "split", workspace: ws.data.workspace, surface });
-              await Promise.all([pollSurfaces(), pollScreens()]);
-            }
+            await asActive(async () => {
+              const res = await cmux.call("surface.split", {
+                surface_id: surfaceId,
+                direction: "right",
+              });
+              const surface = res?.surface_id;
+              if (surface) await announceCreated(ws, "split", workspace, surface);
+            });
           }
         } else if (msg.type === "new-workspace") {
           // A fresh workspace, opened in the currently-viewed workspace's directory when there
           // is one (so "new workspace" means "another agent on this repo"), else cmux's default.
           const cwd = workspaceCache.find((w) => w.id === ws.data.workspace)?.current_directory;
-          const res = await cmux.call("workspace.create", cwd ? { cwd } : {});
-          const workspace = res?.workspace_id;
-          if (workspace) {
-            // A new workspace's terminal isn't instantiated until cmux renders it once, so
-            // selecting it forces the render (then read_text works); restore the Mac's prior
-            // focus right after so creating from the phone doesn't yank the desktop away.
-            const prev = windowsCache.find((w) => w.id === currentWindowId)?.selected_workspace_id;
-            await onWorkspace("workspace.select", workspace).catch(() => {});
-            if (prev && prev !== workspace) await onWorkspace("workspace.select", prev).catch(() => {});
+          await asActive(async () => {
+            const res = await cmux.call("workspace.create", cwd ? { cwd } : {});
+            const workspace = res?.workspace_id;
+            if (!workspace) return;
+
+            // Under the active override the new terminal is normally live right away. Only
+            // when it isn't does cmux still need the workspace put on screen to instantiate
+            // it — so select it and hand the Mac's selection straight back. That round trip
+            // yanks the desktop for a moment, which is why it is a fallback and not the
+            // default path it used to be.
+            const list = (await onWorkspace("surface.list", workspace))?.surfaces ?? [];
+            const surface = list[0]?.id;
+            if (surface && !(await waitReadable(surface, 5))) {
+              const prev = windowsCache.find((w) => w.id === currentWindowId)?.selected_workspace_id;
+              await onWorkspace("workspace.select", workspace).catch(() => {});
+              if (prev && prev !== workspace) {
+                await onWorkspace("workspace.select", prev).catch(() => {});
+              }
+            }
+
             send(ws, "created", { kind: "workspace", workspace });
             await pollWorkspaces(); // broadcast the new list so every client sees it
-          }
+          });
         } else if (msg.type === "close-surface" && msg.surface) {
           // Close one tab/pane. cmux moves focus to a sibling; the client's surfaces
           // handler falls back to the workspace focus when the viewed one disappears.
