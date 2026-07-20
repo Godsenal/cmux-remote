@@ -7,7 +7,8 @@
   "scripts": {
     "start": "bun run server.ts",
     "install-cli": "zsh scripts/install-cli.sh",
-    "build": "bun build --compile --minify server.ts --outfile cmux-remote"
+    "build": "bun build --compile --minify server.ts --outfile cmux-remote",
+    "postinstall": "CMUX_REMOTE_WIRE_ONLY=1 zsh scripts/install-autostart.sh || true"
   },
   "dependencies": {
     "qrcode": "^1.5.4",
