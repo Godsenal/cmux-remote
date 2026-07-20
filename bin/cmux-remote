@@ -1,0 +1,29 @@
+#!/bin/zsh
+# Launcher so `cmux-remote` works from any directory.
+#
+# Symlink this into a directory on PATH (`bun run install-cli` does it for you);
+# it resolves back through the symlink to the repo it lives in, so the command
+# always runs the checkout it was installed from — no hardcoded paths.
+#
+# Still must be run inside a cmux terminal: cmux's socket is `cmuxOnly`, so a
+# process without cmux ancestry is rejected no matter where it was launched from.
+
+set -u
+
+# Resolve symlinks by hand — macOS has no `readlink -f`.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *)  SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+cd "$DIR" || { echo "cmux-remote: $DIR not found" >&2; exit 1; }
+
+command -v bun >/dev/null 2>&1 || { echo "cmux-remote: bun not found — https://bun.sh" >&2; exit 1; }
+[ -d node_modules ] || bun install --frozen-lockfile --silent
+
+exec bun run server.ts "$@"

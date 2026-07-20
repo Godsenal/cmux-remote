@@ -3,8 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": { "cmux-remote": "./bin/cmux-remote" },
   "scripts": {
     "start": "bun run server.ts",
+    "install-cli": "zsh scripts/install-cli.sh",
     "build": "bun build --compile --minify server.ts --outfile cmux-remote"
   },
   "dependencies": {

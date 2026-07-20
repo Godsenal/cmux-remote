@@ -47,6 +47,10 @@ bun install
 bun start
 ```
 
+Want to launch it from anywhere as `cmux-remote`? Run `bun run install-cli` once — it
+symlinks the launcher onto your PATH (undo with `bun run install-cli --uninstall`). The
+command still has to be run inside a cmux terminal; only the directory stops mattering.
+
 On first run it auto-generates a token + push keys, auto-configures `tailscale serve`, and
 prints a **QR code**:
 

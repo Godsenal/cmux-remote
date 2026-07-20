@@ -1,5 +1,5 @@
 node_modules/
-cmux-remote
+/cmux-remote
 *.bun-build
 .DS_Store
 *.png.tmp
