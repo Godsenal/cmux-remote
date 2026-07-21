@@ -10,7 +10,7 @@
 import webpush from "web-push";
 import qrcode from "qrcode";
 import { homedir } from "node:os";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { printBanner } from "./startup";
 
 import indexHtml from "./public/index.html" with { type: "text" };
@@ -18,9 +18,35 @@ import swJs from "./public/sw.js" with { type: "text" };
 import icon192 from "./public/icon-192.png" with { type: "file" };
 import icon512 from "./public/icon-512.png" with { type: "file" };
 
-const SOCKET_PATH =
-  process.env.CMUX_SOCKET_PATH ||
-  `${homedir()}/Library/Application Support/cmux/cmux.sock`;
+/** cmux writes its live socket path here on every launch — covers paths we don't know. */
+function lastSocketPathHint(): string | undefined {
+  try {
+    return readFileSync("/tmp/cmux-last-socket-path", "utf8").trim() || undefined;
+  } catch {
+    return undefined; // cmux hasn't written one — the static candidates still apply.
+  }
+}
+
+// cmux has moved its socket between releases (Application Support → ~/.local/state), so
+// don't pin one path: take the first that actually exists. Falling through to the last
+// candidate keeps the "can't reach cmux" message pointing at something sensible.
+function resolveSocketPath(): string {
+  // An explicit override is authoritative. Probing it for existence and quietly falling
+  // through would connect somewhere the caller didn't ask for — failing loudly at the
+  // path they named is the honest behaviour.
+  const override = process.env.CMUX_SOCKET_PATH;
+  if (override) return override;
+
+  const candidates = [
+    lastSocketPathHint(),
+    `${homedir()}/.local/state/cmux/cmux.sock`,
+    `${homedir()}/Library/Application Support/cmux/cmux.sock`,
+  ].filter((p): p is string => !!p);
+
+  return candidates.find((p) => existsSync(p)) ?? candidates[candidates.length - 1];
+}
+
+const SOCKET_PATH = resolveSocketPath();
 const PORT = Number(process.env.PORT || 8787);
 const SCREEN_POLL_MS = Number(process.env.SCREEN_POLL_MS || 350);
 const META_POLL_MS = Number(process.env.META_POLL_MS || 2000);
@@ -627,6 +653,42 @@ const authorized = (req: Request, url: URL): boolean =>
     .split(";")
     .some((c) => c.trim() === `cmux_remote=${config.token}`);
 
+// A server that can't reach cmux still binds the port and still serves the PWA — it
+// just has nothing behind it. That state is unrecoverable in-process: the socket is
+// `cmuxOnly`, so once this process loses its cmux ancestry (supervisor dies, we get
+// reparented to launchd) every reconnect is refused, forever. Retrying quietly is what
+// leaves a zombie holding :8787 while the phone shows a dead terminal — and because
+// autostart only probes whether the port is bound, the zombie also blocks its own
+// replacement. So: ping continuously, and once cmux has been gone long enough to rule
+// out an app restart, exit non-zero and let the supervisor respawn us under cmux.
+const CMUX_GRACE_MS = Number(process.env.CMUX_UNREACHABLE_EXIT_MS || 60_000);
+let cmuxDownSince: number | null = null;
+
+async function healthTick() {
+  const ok = await cmux
+    .call("system.ping")
+    .then(() => true)
+    .catch(() => false);
+
+  if (ok) {
+    if (cmuxDownSince) console.log("cmux reachable again.");
+    cmuxDownSince = null;
+    return;
+  }
+
+  cmuxDownSince ??= Date.now();
+  const downMs = Date.now() - cmuxDownSince;
+  if (downMs >= CMUX_GRACE_MS) {
+    console.error(
+      `cmux unreachable for ${Math.round(downMs / 1000)}s — exiting so the supervisor ` +
+        `can restart this under cmux (a reparented process can never reconnect).`,
+    );
+    process.exit(1);
+  }
+}
+
+setInterval(healthTick, 5_000);
+
 const page = indexHtml.replace("__VAPID_PUBLIC_KEY__", config.vapid.publicKey);
 
 const server = Bun.serve<ClientData>({
@@ -636,6 +698,17 @@ const server = Bun.serve<ClientData>({
 
   async fetch(req, server) {
     const url = new URL(req.url);
+
+    // Unauthenticated on purpose: it leaks nothing, and autostart has to be able to
+    // tell "port bound by a working server" from "port bound by a zombie" before it
+    // decides whether to spawn a replacement. 503 means the port is taken but dead.
+    if (url.pathname === "/health") {
+      const ok = cmuxDownSince === null;
+      return Response.json(
+        { ok, cmux: ok ? "connected" : "unreachable" },
+        { status: ok ? 200 : 503 },
+      );
+    }
 
     if (url.pathname === "/ws") {
       if (!authorized(req, url)) return new Response("unauthorized", { status: 401 });
@@ -858,7 +931,11 @@ const cmuxOk = await cmux
   .then(() => true)
   .catch(() => false);
 
+// Seed the watchdog from this first ping, so /health can't report a false "connected"
+// during the grace period before the first tick — and so a server that never reached
+// cmux at all exits on the same timer as one that lost it later.
 if (!cmuxOk) {
+  cmuxDownSince = Date.now();
   console.log(
     "\n  \x1b[31m✗ Can't reach cmux.\x1b[0m Run this inside a cmux terminal — the socket only\n" +
       "    admits processes spawned under cmux (access_mode \"cmuxOnly\").\n" +

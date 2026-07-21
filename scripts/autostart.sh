@@ -19,10 +19,32 @@ STATE_DIR="$HOME/.cmux-remote"
 LOCK="$STATE_DIR/autostart.lock"
 mkdir -p "$STATE_DIR"
 
-_up() { command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$CMUX_REMOTE_PORT" 2>/dev/null; }
+# "Is the port bound" is not the same question as "is it working". A server that lost
+# its cmux socket keeps listening and keeps answering HTTP, so a port probe reports it
+# healthy and we never replace it — the zombie blocks its own replacement. Ask /health,
+# which reports actual cmux reachability (503 = bound but dead), and fall back to a bare
+# port probe only if curl is missing.
+_bound() { command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$CMUX_REMOTE_PORT" 2>/dev/null; }
 
-# Already serving? Nothing to do.
+_up() {
+  command -v curl >/dev/null 2>&1 || { _bound; return $?; }
+  [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:$CMUX_REMOTE_PORT/health" 2>/dev/null)" = 200 ]
+}
+
+# Already serving *and* actually talking to cmux? Nothing to do.
 _up && { return 0 2>/dev/null || exit 0; }
+
+# Bound but unhealthy: a zombie from a previous session is squatting the port. It can
+# never recover (it lost cmux ancestry), so clear it out — otherwise the launch below
+# just crash-loops on EADDRINUSE, which is how the log reached 80MB.
+if _bound; then
+  echo "cmux-remote: stale server on :$CMUX_REMOTE_PORT can't reach cmux — replacing it" >&2
+  lsof -nP -iTCP:"$CMUX_REMOTE_PORT" -sTCP:LISTEN -t 2>/dev/null | while read -r pid; do
+    kill "$pid" 2>/dev/null
+  done
+  for _ in {1..20}; do _bound || break; sleep 0.25; done
+fi
 
 # Serialize terminals racing to start it (mkdir is atomic). Stale locks older
 # than 30s are reclaimed so a killed launcher never blocks forever.
