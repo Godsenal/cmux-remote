@@ -278,6 +278,37 @@ async function isOnScreen(surface: string): Promise<boolean> {
 }
 
 /**
+ * Ensures cmux has actually drawn the target before we try to mirror it.
+ *
+ * Recent cmux only lets you read_text a surface it is currently rendering: an unselected
+ * workspace now answers "Failed to read terminal text", where older cmux read it fine
+ * (the note on waitReadable predates this change). Since cmux draws only the selected
+ * workspace of each window, a workspace the desktop isn't showing is unreadable, and the
+ * phone gets stuck on the "preparing terminal" hint forever. Focusing it forces the
+ * render — and it stays readable after we drop the focus override — so do that once on
+ * subscribe. We skip the focus when it already reads, so opening the workspace the desktop
+ * is already on doesn't yank its view to whatever the phone last tapped.
+ */
+async function ensureRendered(target: { workspace: string; surface: string | null }): Promise<void> {
+  let surface = target.surface;
+  if (!surface) {
+    const list = await onWorkspace("surface.list", target.workspace).catch(() => null);
+    const surfaces: any[] = list?.surfaces ?? [];
+    surface = surfaces.find((s) => s.selected_in_pane)?.id ?? surfaces[0]?.id ?? null;
+  }
+  if (!surface) return;
+
+  const alreadyReadable = await cmux
+    .call("surface.read_text", { surface_id: surface, lines: 1 })
+    .then(() => true)
+    .catch(() => false);
+  if (alreadyReadable) return;
+
+  await asActive(() => cmux.call("surface.focus", { surface_id: surface as string }));
+  await waitReadable(surface);
+}
+
+/**
  * Renders a freshly created surface and tells the phone how it went.
  *
  * Focusing is what makes cmux instantiate the terminal; the wait afterwards is what turns
@@ -808,6 +839,7 @@ const server = Bun.serve<ClientData>({
           ws.data.surface = msg.surface ?? null;
           if (unread.delete(msg.workspace)) broadcastUnread(); // opening it marks it read
           lastScreen.delete(targetKey(ws.data)); // force a repaint for the new view
+          await ensureRendered(ws.data); // make cmux draw it, else read_text can't see it
           await Promise.all([pollScreens(), pollSurfaces()]);
         } else if (msg.type === "send" && ws.data.workspace) {
           // Multi-line input must arrive as one paste. Sent raw, each newline acts as a
