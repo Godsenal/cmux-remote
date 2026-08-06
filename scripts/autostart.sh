@@ -48,8 +48,22 @@ fi
 
 # Serialize terminals racing to start it (mkdir is atomic). Stale locks older
 # than 30s are reclaimed so a killed launcher never blocks forever.
+#
+# Compare mtimes by hand rather than with `find -mmin +0.5`: BSD find rejects a
+# fractional minute outright ("illegal trailing character"), so that test never
+# saw a stale lock, and one leaked lock — a terminal closed mid-launch — kept
+# every later terminal from starting the server until someone rmdir'd it.
+_lock_age() {
+  local mtime
+  mtime="$(date -r "$LOCK" +%s 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)"
+  [ -n "$mtime" ] || return 1
+  echo $(( $(date +%s) - mtime ))
+}
+
 if ! mkdir "$LOCK" 2>/dev/null; then
-  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +0.5 2>/dev/null)" ]; then
+  # Unreadable mtime counts as stale — better to race than to wedge forever.
+  age="$(_lock_age)"
+  if [ -z "$age" ] || [ "$age" -ge 30 ]; then
     rmdir "$LOCK" 2>/dev/null; mkdir "$LOCK" 2>/dev/null || { return 0 2>/dev/null || exit 0; }
   else
     return 0 2>/dev/null || exit 0
