@@ -366,21 +366,74 @@ scrim.onclick = () => setDrawer(false);
   addEventListener("touchcancel", end, { passive: true });
 })();
 
-function connect() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+let retry = 0; // consecutive failed connects — drives the backoff
+let lastRx = 0; // when the server last said anything, ping replies included
 
-  ws.onopen = () => {
+function connect() {
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return; // already up or trying
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const sock = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+  ws = sock;
+
+  sock.onopen = () => {
+    retry = 0;
+    lastRx = Date.now();
     dotEl.classList.add("on");
     const saved = localStorage.getItem("workspace");
-    if (saved) subscribe(saved);
+    // Restore the exact view, not just the workspace: subscribe() clears currentSurface,
+    // so a reconnect used to silently bounce anyone watching a split back to the focus.
+    const surface = currentSurface;
+    if (saved) {
+      subscribe(saved);
+      if (surface) subscribeSurface(surface);
+    }
   };
-  ws.onclose = () => {
+  sock.onclose = () => {
+    if (ws !== sock) return; // a socket we already replaced — its close is not news
     dotEl.classList.remove("on");
-    setTimeout(connect, 1200); // the bridge restarts often during development
+    // Back off so a server that is down (or a phone with no route) isn't hammered once
+    // a second all night; wake() below resets this the moment the user looks at the app.
+    setTimeout(connect, Math.min(1200 * 2 ** retry++, 15000));
   };
-  ws.onmessage = (e) => handle(JSON.parse(e.data));
+  // onerror doesn't always reach onclose on iOS — close it ourselves so it does.
+  sock.onerror = () => { try { sock.close(); } catch {} };
+  sock.onmessage = (e) => {
+    lastRx = Date.now();
+    handle(JSON.parse(e.data));
+  };
 }
+
+// The server only speaks when something changed, so a quiet socket is normal and can't
+// be read as "alive". Ask it directly, and treat an unanswered ask as a dead socket —
+// which is exactly what a suspended iOS PWA gets back: readyState 1, nothing flowing,
+// onclose never fired, terminal frozen behind a green dot.
+setInterval(() => {
+  if (!ws || ws.readyState !== 1) return;
+  const quiet = Date.now() - lastRx;
+  if (quiet > 45000) { try { ws.close(); } catch {} return; } // → onclose → reconnect
+  if (quiet > 20000) ws.send(JSON.stringify({ type: "ping" }));
+}, 10000);
+
+// Coming back to the app (or back onto a network) is the moment a stale socket hurts
+// most, and the moment the user is least willing to wait out a backoff.
+function wake() {
+  if (document.hidden) return;
+  if (ws && ws.readyState === 1) {
+    const sock = ws, at = Date.now();
+    lastRx = at; // time spent suspended must not count as the server going quiet
+    try { sock.send(JSON.stringify({ type: "ping" })); } catch { }
+    // Prove it rather than trusting readyState: no reply shortly → it's a zombie.
+    setTimeout(() => {
+      if (ws === sock && lastRx <= at) { try { sock.close(); } catch {} }
+    }, 6000);
+    return;
+  }
+  retry = 0;
+  connect();
+}
+addEventListener("visibilitychange", wake);
+addEventListener("online", wake);
+addEventListener("pageshow", wake);
 
 function handle(m) {
   if (m.type === "screen") {

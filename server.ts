@@ -46,7 +46,10 @@ function resolveSocketPath(): string {
   return candidates.find((p) => existsSync(p)) ?? candidates[candidates.length - 1];
 }
 
-const SOCKET_PATH = resolveSocketPath();
+// Re-resolved on every reconnect, not pinned: cmux writes a fresh socket path on each
+// launch, so a path captured at startup goes stale the moment cmux restarts — and a
+// pinned stale path can never reconnect, which turns a blip into the 60s exit below.
+let SOCKET_PATH = resolveSocketPath();
 const PORT = Number(process.env.PORT || 8787);
 const SCREEN_POLL_MS = Number(process.env.SCREEN_POLL_MS || 350);
 const META_POLL_MS = Number(process.env.META_POLL_MS || 2000);
@@ -119,6 +122,7 @@ class CmuxClient {
     if (this.#connecting) return this.#connecting;
 
     this.#connecting = (async () => {
+      SOCKET_PATH = resolveSocketPath(); // cmux may have restarted onto a new path
       this.#sock = await Bun.connect({
         unix: SOCKET_PATH,
         socket: {
@@ -169,6 +173,9 @@ class CmuxClient {
     const id = `r${++this.#seq}`;
 
     return new Promise((resolve, reject) => {
+      // The socket can drop between #ensure resolving and this write; a bare property
+      // access on null would throw a TypeError that reads nothing like "cmux went away".
+      if (!this.#sock) return reject(new Error("cmux socket closed"));
       this.#pending.set(id, { resolve, reject });
       this.#sock.write(JSON.stringify({ id, method, params }) + "\n");
       setTimeout(() => {
@@ -391,14 +398,33 @@ async function pushToPhones(payload: Record<string, unknown>) {
 
 // --- clients ---------------------------------------------------------------
 
-type ClientData = { workspace: string | null; surface: string | null; window: string | null };
+type ClientData = {
+  workspace: string | null;
+  surface: string | null;
+  window: string | null;
+  // Last window/workspace payload actually sent to this client, so a tick that changed
+  // nothing this client can see costs nothing. Per-client because each one is scoped
+  // to its own cmux window and therefore sees a different list.
+  sentWindows: string | null;
+  sentWorkspaces: string | null;
+};
 const clients = new Set<any>();
 
 /** What a client is currently viewing: a specific surface, or a workspace's focus. */
 const targetKey = (d: ClientData) => d.surface || d.workspace || "";
 
+// A phone that stopped draining — backgrounded, screen off, or simply on a link slower
+// than we produce — makes the server queue everything it missed. Queued terminal frames
+// are worthless by the time they'd arrive, so past this much outstanding data drop the
+// socket instead of growing the queue: the client reconnects and gets a fresh repaint.
+const MAX_BUFFERED = 1 << 20; // 1 MB
+
 function send(ws: any, type: string, payload: Record<string, unknown>) {
   try {
+    if (ws.getBufferedAmount?.() > MAX_BUFFERED) {
+      ws.close(1013, "backpressure"); // 1013 Try Again Later
+      return;
+    }
     ws.send(JSON.stringify({ type, ...payload }));
   } catch {
     /* client vanished mid-send */
@@ -507,6 +533,25 @@ async function pollSurfaces() {
   );
 }
 
+/**
+ * The only workspace fields the phone renders. cmux's own entries carry far more —
+ * conversation transcripts, ssh/proxy state, port tables, heartbeats — which made the
+ * 2s broadcast 48 KB per client (79 MB/hour to a phone showing nothing).
+ *
+ * Projecting also makes the change check work at all: cmux serialises its objects with
+ * a different key order every call, so the raw JSON differs on every single tick even
+ * when nothing happened. Rebuilding with a fixed key order is what makes the comparison
+ * in pollWorkspaces meaningful rather than always-true.
+ */
+const slimWorkspace = (w: any) => ({
+  id: w.id,
+  title: w.title,
+  current_directory: w.current_directory,
+  selected: !!w.selected,
+});
+
+// Kept unprojected: cwd lookups for new surfaces/workspaces and notification titles
+// read from here, and it is never sent over the wire.
 let workspaceCache: any[] = [];
 // cmux can have several windows open at once, each with its own workspaces. Clients
 // default to the current window and can switch; workspaceCache is the union across all
@@ -514,13 +559,26 @@ let workspaceCache: any[] = [];
 let windowsCache: any[] = [];
 let currentWindowId: string | null = null;
 
+/** Logs a recurring fault once per distinct message, so a stuck poller is visible but quiet. */
+const lastWarn = new Map<string, string>();
+function warnOnce(where: string, err: unknown) {
+  const msg = String((err as any)?.message ?? err);
+  if (lastWarn.get(where) === msg) return;
+  lastWarn.set(where, msg);
+  console.error(`${where}: ${msg}`);
+}
+
 async function pollWorkspaces() {
   let wins: any[];
   try {
     wins = (await cmux.call("window.list"))?.windows ?? [];
-  } catch {
-    return; // cmux restarting; next tick retries
+  } catch (err) {
+    // cmux restarting; next tick retries. Silence here used to hide a poller that was
+    // failing on every tick, so say it once — repeats are suppressed until it changes.
+    warnOnce("pollWorkspaces", err);
+    return;
   }
+  lastWarn.delete("pollWorkspaces");
   windowsCache = wins;
   try {
     currentWindowId = (await cmux.call("window.current"))?.window_id ?? wins[0]?.id ?? null;
@@ -549,8 +607,22 @@ async function pollWorkspaces() {
   for (const c of clients) {
     let winId = c.data.window || currentWindowId;
     if (winId && !byWindow.has(winId)) winId = currentWindowId; // a picked window that closed
-    send(c, "windows", { windows, current: winId });
-    send(c, "workspaces", { workspaces: (winId && byWindow.get(winId)) || [] });
+
+    // Send only what changed. Both payloads are rebuilt from cmux every tick, but the
+    // parts a client can see almost never move — so compare before sending, or a phone
+    // watching an idle Mac pays for a full list every 2s forever.
+    const winJson = JSON.stringify({ windows, current: winId });
+    if (c.data.sentWindows !== winJson) {
+      c.data.sentWindows = winJson;
+      send(c, "windows", { windows, current: winId });
+    }
+
+    const list = ((winId && byWindow.get(winId)) || []).map(slimWorkspace);
+    const wsJson = JSON.stringify(list);
+    if (c.data.sentWorkspaces !== wsJson) {
+      c.data.sentWorkspaces = wsJson;
+      send(c, "workspaces", { workspaces: list });
+    }
   }
 }
 
@@ -662,9 +734,24 @@ async function pollNotifications() {
   }
 }
 
+/**
+ * Runs a poller forever, surfacing its failures without flooding the log.
+ *
+ * The catch used to be silent, which meant a poller that failed on every single tick —
+ * the exact shape of "the phone shows nothing and nobody can say why" — left no trace
+ * at all. Log the first failure and then only on change, so a persistent fault is
+ * visible once rather than a few times a second.
+ */
 function loop(fn: () => Promise<void>, ms: number) {
+  let lastErr = "";
   const tick = async () => {
-    await fn().catch(() => {});
+    await fn().catch((err) => {
+      const msg = String(err?.message ?? err);
+      if (msg !== lastErr) {
+        lastErr = msg;
+        console.error(`poller ${fn.name} failing: ${msg}`);
+      }
+    });
     setTimeout(tick, ms);
   };
   tick();
@@ -743,7 +830,14 @@ const server = Bun.serve<ClientData>({
 
     if (url.pathname === "/ws") {
       if (!authorized(req, url)) return new Response("unauthorized", { status: 401 });
-      if (server.upgrade(req, { data: { workspace: null, surface: null, window: null } })) return;
+      const data: ClientData = {
+        workspace: null,
+        surface: null,
+        window: null,
+        sentWindows: null,
+        sentWorkspaces: null,
+      };
+      if (server.upgrade(req, { data })) return;
       return new Response("upgrade failed", { status: 400 });
     }
 
@@ -832,7 +926,13 @@ const server = Bun.serve<ClientData>({
       }
 
       try {
-        if (msg.type === "subscribe") {
+        if (msg.type === "ping") {
+          // Liveness, answered before anything else. Now that the server only speaks
+          // when something changed, silence no longer proves the link is alive — so the
+          // client asks, and an unanswered ask is how it learns the socket died without
+          // ever firing onclose (which is the normal outcome of an iOS app suspend).
+          send(ws, "pong", {});
+        } else if (msg.type === "subscribe") {
           // A new workspace resets the surface to the workspace's focus; an explicit
           // surface (a pane/tab) narrows to just that one.
           ws.data.workspace = msg.workspace;
@@ -857,6 +957,7 @@ const server = Bun.serve<ClientData>({
           // Scope this client to another cmux window; its workspace list re-scopes on the
           // next poll (triggered now). Read-only — it never moves the desktop's focus.
           ws.data.window = msg.window;
+          ws.data.sentWorkspaces = null; // re-send even if the new window's list matches
           await pollWorkspaces();
         } else if (msg.type === "select" && msg.workspace) {
           await onWorkspace("workspace.select", msg.workspace);
