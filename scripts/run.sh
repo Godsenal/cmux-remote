@@ -8,26 +8,22 @@
 # tree is clean and fast-forwardable, pulls the new version, rebuilds, and restarts
 # the server. The clean-tree guard means it never clobbers local work — a machine
 # you develop on with uncommitted changes just keeps running what it has.
+#
+# Everything lives in main(), called on the very last line. That is load-bearing: zsh
+# reads a script lazily, so an update that rewrites this file mid-run leaves the running
+# shell resuming at a stale byte offset inside new content. That is not theoretical — it
+# is how a supervisor here ended up running a second copy of itself as its own child,
+# two loops fighting over one port. Parsing through to `main "$@"` pulls the whole file
+# in first, so the update can't corrupt the instance that performed it.
 
 set -u
-DIR="${CMUX_REMOTE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-cd "$DIR" || { echo "cmux-remote: $DIR not found" >&2; exit 1; }
 
-PORT="${CMUX_REMOTE_PORT:-${PORT:-8787}}"
-AUTOUPDATE="${CMUX_REMOTE_AUTOUPDATE:-1}"
-INTERVAL="${CMUX_REMOTE_UPDATE_INTERVAL:-300}"
+# Resolve this script's path at file scope, not inside main(): zsh rebinds $0 to the
+# function name while a function runs, so `${0:A}` in there resolves to ".../main".
+SELF="${0:A}"
 
 have_bun()   { command -v bun >/dev/null 2>&1; }
 clean_tree() { [ -z "$(git status --porcelain 2>/dev/null)" ]; }
-
-# Hold off system sleep for as long as the bridge is running. A sleeping Mac drops off
-# the tailnet entirely, so "always reachable from the phone" is really "never idle-sleep":
-# with the stock 1-minute sleep timer this machine was taking 'Idle Sleep' every ~10
-# minutes, i.e. precisely whenever nobody was at the desk — which is when you reach for
-# the phone. `-s` asserts only while on AC power, so on battery it still sleeps normally,
-# and it leaves display sleep alone (the screen goes dark as usual). `-w $$` scopes the
-# assertion to this supervisor: when run.sh exits, caffeinate does too.
-command -v caffeinate >/dev/null 2>&1 && caffeinate -s -w $$ &
 
 build() {
   have_bun || return 0
@@ -74,36 +70,79 @@ update_available() {
   [ -n "$remote" ] && [ "$local" != "$remote" ] && clean_tree
 }
 
-# Pull once before the first launch (safe: clean + fast-forward only).
-if [ "$AUTOUPDATE" = 1 ] && clean_tree; then git pull --ff-only -q 2>/dev/null; fi
-build
-
-TICK=3 # seconds between liveness checks — keeps crash-restart snappy
-while true; do
-  if ! wait_for_port; then
-    echo "cmux-remote: :$PORT still held by another process — backing off" >&2
-    sleep 15
-    continue
+self_hash() {
+  if command -v shasum >/dev/null 2>&1; then shasum "$SELF" 2>/dev/null | cut -d' ' -f1
+  else md5 -q "$SELF" 2>/dev/null
   fi
-  run_server &
-  SRV=$!
-  elapsed=0
-  # Poll in short ticks so a crashed server restarts within a few seconds, and run
-  # the (heavier) update check only once every INTERVAL.
-  while kill -0 "$SRV" 2>/dev/null; do
-    sleep "$TICK"
-    kill -0 "$SRV" 2>/dev/null || break
-    elapsed=$((elapsed + TICK))
-    if [ "$elapsed" -ge "$INTERVAL" ]; then
-      elapsed=0
-      if update_available; then
-        echo "cmux-remote: new version on origin — updating…" >&2
-        git pull --ff-only -q 2>/dev/null && build
-        kill "$SRV" 2>/dev/null
-        break
-      fi
+}
+
+main() {
+  DIR="${CMUX_REMOTE_DIR:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+  cd "$DIR" || { echo "cmux-remote: $DIR not found" >&2; exit 1; }
+
+  PORT="${CMUX_REMOTE_PORT:-${PORT:-8787}}"
+  AUTOUPDATE="${CMUX_REMOTE_AUTOUPDATE:-1}"
+  INTERVAL="${CMUX_REMOTE_UPDATE_INTERVAL:-300}"
+
+  # Hold off system sleep for as long as the bridge is running. A sleeping Mac drops off
+  # the tailnet entirely, so "always reachable from the phone" is really "never idle-sleep":
+  # with the stock 1-minute sleep timer this machine was taking 'Idle Sleep' every ~10
+  # minutes, i.e. precisely whenever nobody was at the desk — which is when you reach for
+  # the phone. `-s` asserts only while on AC power, so on battery it still sleeps normally,
+  # and it leaves display sleep alone (the screen goes dark as usual). `-w $$` scopes the
+  # assertion to this supervisor: when run.sh exits, caffeinate does too.
+  CAF=""
+  if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -s -w $$ &
+    CAF=$!
+  fi
+
+  # Pull once before the first launch (safe: clean + fast-forward only).
+  if [ "$AUTOUPDATE" = 1 ] && clean_tree; then git pull --ff-only -q 2>/dev/null; fi
+  build
+
+  local TICK=3 # seconds between liveness checks — keeps crash-restart snappy
+  local elapsed before
+  while true; do
+    if ! wait_for_port; then
+      echo "cmux-remote: :$PORT still held by another process — backing off" >&2
+      sleep 15
+      continue
     fi
+    run_server &
+    SRV=$!
+    elapsed=0
+    # Poll in short ticks so a crashed server restarts within a few seconds, and run
+    # the (heavier) update check only once every INTERVAL.
+    while kill -0 "$SRV" 2>/dev/null; do
+      sleep "$TICK"
+      kill -0 "$SRV" 2>/dev/null || break
+      elapsed=$((elapsed + TICK))
+      if [ "$elapsed" -ge "$INTERVAL" ]; then
+        elapsed=0
+        if update_available; then
+          echo "cmux-remote: new version on origin — updating…" >&2
+          before="$(self_hash)"
+          git pull --ff-only -q 2>/dev/null && build
+          kill "$SRV" 2>/dev/null
+          wait "$SRV" 2>/dev/null
+          # A supervisor that just updated itself is still running the old code, and used
+          # to keep running it until the machine rebooted — so a fix to this file only
+          # landed days later. Hand over to the new version instead. exec keeps the pid
+          # (and this workspace's cmux ancestry, which the server depends on); the old
+          # caffeinate would otherwise linger, since it waits on that same pid.
+          if [ "$(self_hash)" != "$before" ]; then
+            echo "cmux-remote: supervisor updated — re-exec into the new run.sh" >&2
+            [ -n "$CAF" ] && kill "$CAF" 2>/dev/null
+            exec zsh "$SELF"
+          fi
+          break
+        fi
+      fi
+    done
+    wait "$SRV" 2>/dev/null
+    sleep 1 # don't hot-loop if the server dies immediately
   done
-  wait "$SRV" 2>/dev/null
-  sleep 1 # don't hot-loop if the server dies immediately
-done
+}
+
+main "$@"
