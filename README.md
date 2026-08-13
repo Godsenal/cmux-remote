@@ -123,8 +123,15 @@ and runs `scripts/run.sh` there in the foreground, where it keeps its connection
 in every cmux terminal (including the ones cmux restores on launch), starts the server
 once, and never starts a second copy. You'll see a `⚡ cmux-remote` workspace in the sidebar.
 
-The Mac must be awake and on power for the phone to reach it. Closing the lid sleeps it
-(unless an external display keeps it in clamshell); on battery, `caffeinate -s` holds it.
+The Mac must be awake for the phone to reach it — a sleeping Mac drops off the tailnet
+entirely, so the app just fails to connect. macOS ships an aggressive idle-sleep timer
+(often a minute after the display goes dark), and it fires precisely when nobody is at the
+desk, which is when you reach for the phone.
+
+So `run.sh` holds the assertion itself for as long as it runs: `caffeinate -s`, which
+blocks system sleep **while on AC power** and leaves display sleep alone — the screen still
+goes dark. On battery the Mac sleeps normally. Closing the lid still sleeps it unless an
+external display keeps it in clamshell.
 
 ### Auto-update
 
