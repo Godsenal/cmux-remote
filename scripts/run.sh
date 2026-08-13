@@ -20,6 +20,15 @@ INTERVAL="${CMUX_REMOTE_UPDATE_INTERVAL:-300}"
 have_bun()   { command -v bun >/dev/null 2>&1; }
 clean_tree() { [ -z "$(git status --porcelain 2>/dev/null)" ]; }
 
+# Hold off system sleep for as long as the bridge is running. A sleeping Mac drops off
+# the tailnet entirely, so "always reachable from the phone" is really "never idle-sleep":
+# with the stock 1-minute sleep timer this machine was taking 'Idle Sleep' every ~10
+# minutes, i.e. precisely whenever nobody was at the desk — which is when you reach for
+# the phone. `-s` asserts only while on AC power, so on battery it still sleeps normally,
+# and it leaves display sleep alone (the screen goes dark as usual). `-w $$` scopes the
+# assertion to this supervisor: when run.sh exits, caffeinate does too.
+command -v caffeinate >/dev/null 2>&1 && caffeinate -s -w $$ &
+
 build() {
   have_bun || return 0
   [ -d node_modules ] || bun install --frozen-lockfile --silent 2>/dev/null
@@ -41,6 +50,19 @@ run_server() {
   fi
 }
 
+port_bound() { command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$PORT" 2>/dev/null; }
+
+# Never relaunch into an occupied port. A restart that races the previous server's socket
+# teardown dies instantly on EADDRINUSE, and this loop then hot-restarts straight back
+# into it — 16 such deaths in one log. Wait the socket out; if the port is still held
+# after that, another launcher is serving this port, so back off rather than crash-loop
+# (if that one dies, the next pass takes over).
+wait_for_port() {
+  local _
+  for _ in {1..40}; do port_bound || return 0; sleep 0.25; done
+  return 1
+}
+
 update_available() {
   [ "$AUTOUPDATE" = 1 ] || return 1
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
@@ -58,6 +80,11 @@ build
 
 TICK=3 # seconds between liveness checks — keeps crash-restart snappy
 while true; do
+  if ! wait_for_port; then
+    echo "cmux-remote: :$PORT still held by another process — backing off" >&2
+    sleep 15
+    continue
+  fi
   run_server &
   SRV=$!
   elapsed=0
