@@ -48,6 +48,26 @@ run_server() {
 
 port_bound() { command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$PORT" 2>/dev/null; }
 
+# "Bound" and "working" are different questions. /health answers the second one: only a
+# server that can still reach cmux's socket returns 200, so a 200 means a *healthy* peer
+# owns this port. No curl, no verdict — stay conservative and treat that as "unknown".
+port_healthy() {
+  command -v curl >/dev/null 2>&1 || return 1
+  [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:$PORT/health" 2>/dev/null)" = 200 ]
+}
+
+# This workspace exists only to host this supervisor, so a supervisor that gives up takes
+# the workspace with it — otherwise it lingers in the sidebar as an empty shell.
+close_own_workspace() {
+  [ -n "${CMUX_WORKSPACE_ID:-}" ] || return 0
+  local bin
+  bin="$(command -v cmux 2>/dev/null)"
+  [ -x "$bin" ] || bin="/Applications/cmux.app/Contents/Resources/bin/cmux"
+  [ -x "$bin" ] || return 0
+  "$bin" close-workspace --workspace "$CMUX_WORKSPACE_ID" >/dev/null 2>&1
+}
+
 # Never relaunch into an occupied port. A restart that races the previous server's socket
 # teardown dies instantly on EADDRINUSE, and this loop then hot-restarts straight back
 # into it — 16 such deaths in one log. Wait the socket out; if the port is still held
@@ -105,7 +125,18 @@ main() {
   local elapsed before
   while true; do
     if ! wait_for_port; then
-      echo "cmux-remote: :$PORT still held by another process — backing off" >&2
+      # Ten seconds on and the port is still someone else's. If that someone is healthy,
+      # this supervisor is simply a duplicate: autostart spawns one per cmux terminal
+      # whenever /health is briefly down (a restart, an update), and each one used to sit
+      # right here logging "backing off" every 15s forever — pinning a workspace open and
+      # sharing one log file. Thirty of them piled up over two days that way. A duplicate
+      # has nothing to take over, so it leaves instead of squatting.
+      if port_healthy; then
+        echo "cmux-remote: :$PORT already served by a healthy instance — exiting as a duplicate" >&2
+        close_own_workspace
+        exit 0
+      fi
+      echo "cmux-remote: :$PORT held by an unhealthy process — backing off" >&2
       sleep 15
       continue
     fi
