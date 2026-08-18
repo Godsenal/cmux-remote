@@ -81,10 +81,14 @@ fi
 
 # Open a dedicated workspace and run the update-and-run loop there. run.sh stays in
 # the foreground (keeping cmux ancestry) and pulls/rebuilds/restarts on new versions.
+#
+# Name it at creation instead of spawning first and renaming after. The rename had to
+# parse the new workspace's ref back out of the command output, and whenever that parse
+# came up empty the workspace kept its raw command as its title — 22 of 30 in the sidebar
+# read as `CMUX_REMOTE_DIR='…' exec zsh '…' | tee '…'`. --name has nothing to miss.
 LOG="$STATE_DIR/server.log"
-NEW_WS="$("$CMUX_BIN" new-workspace --cwd "$CMUX_REMOTE_DIR" \
-  --command "CMUX_REMOTE_DIR='$CMUX_REMOTE_DIR' CMUX_REMOTE_PORT=$CMUX_REMOTE_PORT exec zsh '$CMUX_REMOTE_DIR/scripts/run.sh' 2>&1 | tee '$LOG'" 2>/dev/null | grep -oE 'workspace:[0-9]+' | head -1)"
-[ -n "$NEW_WS" ] && "$CMUX_BIN" rename-workspace --workspace "$NEW_WS" "⚡ cmux-remote" >/dev/null 2>&1
+"$CMUX_BIN" new-workspace --name "⚡ cmux-remote" --cwd "$CMUX_REMOTE_DIR" \
+  --command "CMUX_REMOTE_DIR='$CMUX_REMOTE_DIR' CMUX_REMOTE_PORT=$CMUX_REMOTE_PORT exec zsh '$CMUX_REMOTE_DIR/scripts/run.sh' 2>&1 | tee '$LOG'" >/dev/null 2>&1
 
 # Hold the lock until the port is actually up, so a concurrent terminal doesn't
 # also spawn one during the few seconds before it binds.
